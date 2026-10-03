@@ -352,8 +352,8 @@ const SETS = {
   sv8a:  { fr: 'Terastal Festival ex', en: 'Terastal Festival ex', code: 'SV8a', serie: 'Écarlate et Violet (JP)', date: '2024-12-06', c: ['#D53F8C', '#3182CE'] },
   sv2a:  { fr: 'Pokémon Card 151', en: 'Pokémon Card 151', code: 'SV2a', serie: 'Écarlate et Violet (JP)', date: '2023-06-16', c: ['#D9542B', '#1F7A8C'] },
 };
-const TYPES = { DISPLAY: 'Display', HALF_DISPLAY: 'Demi-display', ETB: 'ETB', UPC: 'UPC', BUNDLE: 'Bundle', TRIPACK: 'Tripack', COFFRET: 'Coffret', BOOSTER: 'Booster', BLISTER: 'Blister', AUTRE: 'Autre', CARD: 'Carte' };
-const LANGS = { FR: 'Français', EN: 'Anglais', JP: 'Japonais' };
+const TYPES = { DISPLAY: 'Display', HALF_DISPLAY: 'Demi-display', ETB: 'ETB', UPC: 'UPC', BUNDLE: 'Bundle', TRIPACK: 'Tripack', COFFRET: 'Coffret', BOOSTER: 'Booster', BLISTER: 'Blister', TIN: 'Tin', DECK: 'Deck', AUTRE: 'Autre', CARD: 'Carte' };
+const LANGS = { FR: 'Français', EN: 'Anglais', JP: 'Japonais', EU: 'Toutes langues', CN: 'Chinois', KR: 'Coréen' };
 const COND_SEALED = { NEUF: { l: 'Neuf parfait', m: 1 }, ABIME: { l: 'Blister abîmé', m: 0.85 }, OUVERT: { l: 'Ouvert', m: 0.6 } };
 const COND_CARD = { M: { l: 'Mint', m: 1.1 }, NM: { l: 'Near Mint', m: 1 }, EX: { l: 'Excellent', m: 0.78 }, GD: { l: 'Good', m: 0.6 }, PL: { l: 'Played', m: 0.45 }, PO: { l: 'Poor', m: 0.3 } };
 const GRADERS = ['PSA', 'CGC', 'PCA', 'BGS'];
@@ -499,7 +499,7 @@ const CATALOG = [
 ];
 
 /* ============ État persistant ============ */
-const DEFAULT_STATE = () => ({ v: 1, items: [], wishlist: [], alerts: [], imported: {}, custom: [], ebayQ: {}, cm: { links: {}, last: {}, field: 'trend' }, settings: { theme: 'dark', demo: false } });
+const DEFAULT_STATE = () => ({ v: 1, items: [], wishlist: [], alerts: [], imported: {}, custom: [], ebayQ: {}, cm: { links: {}, last: {}, field: 'trend', done: {}, lastDay: '' }, settings: { theme: 'dark', demo: false } });
 let state = DEFAULT_STATE();
 function normalize(s) {
   const d = DEFAULT_STATE();
@@ -541,9 +541,11 @@ CATALOG.forEach(genSeries);
 
 let PROD = {};      // id -> produit (catalogue + produits ajoutés)
 let IMP = {};       // id -> [[jour, prix]] trié
+let EXTRA = [];     // catalogue Cardmarket fourni par le robot (version automatique)
 function rebuild() {
   PROD = {};
   CATALOG.forEach(p => PROD[p.id] = p);
+  EXTRA.forEach(p => PROD[p.id] = p);
   state.custom.forEach(p => PROD[p.id] = Object.assign({ custom: true }, p));
   IMP = {};
   for (const [ref, pts] of Object.entries(state.imported)) {
@@ -552,7 +554,7 @@ function rebuild() {
   }
 }
 const P = id => PROD[id];
-const setName = p => p ? (SETS[p.set]?.fr || p.setName || 'Hors catalogue') : '';
+const setName = p => p ? (SETS[p.set]?.fr || p.setName || 'Autres produits') : '';
 const prodName = p => p ? (p.kind === 'card' ? `${p.name} ${p.number || ''}`.trim() : p.name) : 'Produit supprimé';
 
 // Prix de marché de référence (neuf / Near Mint raw) d'un produit à un jour donné.
@@ -567,7 +569,9 @@ function marketAt(ref, d) {
     const [x0, y0] = imp[i], [x1, y1] = imp[i + 1];
     return Math.round((y0 + (y1 - y0) * (d - x0) / (x1 - x0)) * 100) / 100;
   }
-  if (!state.settings.demo) return null;
+  const cid = PROD[ref] && PROD[ref].cm;
+  if (cid && d >= T && typeof CMF !== 'undefined' && CMF.guide) { const v = cmPrice(CMF.guide.get(cid), state.cm.field, false); return v > 0 ? v : null; }
+  if (!state.settings.demo || cid) return null;
   const s = SER[ref];
   if (!s || d < s.start) return null;
   return s.v[Math.min(d - s.start, s.v.length - 1)];
@@ -801,18 +805,29 @@ function cmPrice(row, field, holo) {
   const f = holo ? { trend: row.trendH, avg7: row.avg7H, avg30: row.avg30H } : row;
   return f[field] ?? f.trend ?? f.avg7 ?? f.avg30 ?? row.avg1 ?? row.low ?? null;
 }
-// Applique une ligne de prix Cardmarket à un produit : point du jour, et amorce de courbe au premier relevé.
+// Identifiant Cardmarket d'un produit : intégré au catalogue automatique, ou relié à la main.
+const cmIdOf = ref => (PROD[ref] && PROD[ref].cm) || (state.cm.links[ref] && state.cm.links[ref].id) || null;
+const linkOf = ref => state.cm.links[ref] || (PROD[ref] && PROD[ref].cm ? { id: PROD[ref].cm, name: prodName(PROD[ref]), holo: false } : null);
+const trackedRefs = () => [...new Set([...state.items.filter(it => !it.sold).map(it => it.ref), ...state.wishlist.map(w => w.ref)])].filter(r => PROD[r]);
+function putPoint(ref, date, v, src = 'cm') {
+  const arr = (state.imported[ref] ||= []);
+  const i = arr.findIndex(x => x[0] === date), pt = [date, Math.round(v * 100) / 100, src, 0];
+  if (i >= 0) arr[i] = pt; else arr.push(pt);
+  arr.sort((a, b) => a[0].localeCompare(b[0]));
+  if (arr.length > 400) arr.splice(0, arr.length - 400);
+}
+// Applique une ligne de prix Cardmarket à un produit : point du jour, et amorce de courbe tant que l'historique est court.
 function cmApply(ref, row, date) {
-  const link = state.cm.links[ref]; if (!link || !row) return false;
+  const link = linkOf(ref); if (!link || !row) return false;
   const v = cmPrice(row, state.cm.field, link.holo);
   if (!(v > 0)) return false;
   const arr = (state.imported[ref] ||= []);
   const put = pt => { const i = arr.findIndex(x => x[0] === pt[0]); if (i >= 0) arr[i] = pt; else arr.push(pt); };
-  const first = !arr.some(x => x[2] === 'cm');
   const d = di(date);
+  const first = !arr.some(x => x[2] === 'cm' && di(x[0]) <= d - 10);
   if (first && !link.holo) {
-    if (row.avg30 > 0 && d - 15 >= 0) put([ds(d - 15), row.avg30, 'cm', 0]);
-    if (row.avg7 > 0 && d - 3 >= 0) put([ds(d - 3), row.avg7, 'cm', 0]);
+    if (row.avg30 > 0 && d - 15 >= 0 && !arr.some(x => x[0] === ds(d - 15))) put([ds(d - 15), row.avg30, 'cm', 0]);
+    if (row.avg7 > 0 && d - 3 >= 0 && !arr.some(x => x[0] === ds(d - 3))) put([ds(d - 3), row.avg7, 'cm', 0]);
   }
   put([date, Math.round(v * 100) / 100, 'cm', 0]);
   arr.sort((a, b) => a[0].localeCompare(b[0]));
@@ -823,9 +838,10 @@ function cmApply(ref, row, date) {
 function cmUpdateAll() {
   if (!CMF.guide) return { ok: 0, miss: 0 };
   let ok = 0, miss = 0;
-  for (const [ref, l] of Object.entries(state.cm.links)) {
-    if (!P(ref)) continue;
-    if (cmApply(ref, CMF.guide.get(l.id), CMF.guideDate)) ok++; else miss++;
+  const refs = [...new Set([...trackedRefs(), ...Object.keys(state.cm.links)])];
+  for (const ref of refs) {
+    const id = cmIdOf(ref); if (!id || !P(ref)) continue;
+    if (cmApply(ref, CMF.guide.get(id), CMF.guideDate)) ok++; else miss++;
   }
   return { ok, miss };
 }
@@ -833,13 +849,38 @@ function cmUpdateAll() {
 function cmAutoLink(refs) {
   let linked = 0, unsure = 0;
   for (const ref of refs) {
-    if (state.cm.links[ref]) continue;
-    const p = P(ref); if (!p) continue;
+    const p = P(ref); if (!p || p.cm) continue;
+    if (state.cm.links[ref] && !EXTRA.length) continue;
+    if (EXTRA.length) { const m = exactMatch(p); if (m) { migrateRef(ref, m.id); linked++; continue; } }
     const r = cmSearch(cmQuery(p), p.kind, 3);
-    if (r.length && r[0].sc >= .99 && (!r[1] || r[0].sc - r[1].sc >= .15)) { state.cm.links[ref] = { id: r[0].r.id, name: r[0].r.name }; linked++; }
-    else unsure++;
+    if (!EXTRA.length && r.length && r[0].sc >= .99 && (!r[1] || r[0].sc - r[1].sc >= .15)) {
+      if (EXTRA.length && PROD['cm' + r[0].r.id]) migrateRef(ref, 'cm' + r[0].r.id); else state.cm.links[ref] = { id: r[0].r.id, name: r[0].r.name };
+      linked++;
+    } else unsure++;
   }
   return { linked, unsure };
+}
+// Correspondance exacte entre un produit de l'ancien catalogue et le catalogue Cardmarket.
+const EN_TYPE = { DISPLAY: 'Booster Box', HALF_DISPLAY: 'Booster Box (18 Boosters)', ETB: 'Elite Trainer Box', BUNDLE: 'Booster Bundle', BOOSTER: 'Booster', UPC: 'Ultra Premium Collection' };
+function exactMatch(p) {
+  const s = SETS[p.set]; if (!s) return null;
+  if (p.kind === 'card') {
+    const num = String(p.number || '').split('/')[0].replace(/^0+/, '');
+    const c = EXTRA.filter(x => x.kind === 'card' && norm(SETS[x.set]?.en || '') === norm(s.en) && String(x.number).split('/')[0].replace(/^0+/, '') === num);
+    return c.length === 1 ? c[0] : null;
+  }
+  const want = EN_TYPE[p.type]; if (!want) return null;
+  const target = norm(`${s.en}${p.lang === 'JP' ? ' JP' : ''} ${want}`);
+  const c = EXTRA.filter(x => x.kind === 'sealed' && norm(x.en) === target);
+  return c.length === 1 ? c[0] : null;
+}
+// Remplace un ancien produit par son équivalent du catalogue Cardmarket, partout où il apparaît.
+function migrateRef(from, to) {
+  if (from === to) return;
+  state.items.forEach(it => { if (it.ref === from) it.ref = to; });
+  state.wishlist = state.wishlist.filter((w, i, a) => { if (w.ref === from) w.ref = to; return a.findIndex(x => x.ref === w.ref) === i; });
+  state.alerts.forEach(a => { if (a.ref === from) a.ref = to; });
+  delete state.cm.links[from]; delete state.cm.last[from]; delete state.imported[from]; if (state.cm.done) delete state.cm.done[from];
 }
 // Secours sans fichier : lit le texte copié depuis la page d'un produit sur Cardmarket.
 function parseEuroNum(s) {
@@ -863,43 +904,59 @@ function parseCmPage(text) {
 }
 
 /* ============ Mise à jour automatique (version hébergée sur GitHub) ============ */
-// Sur GitHub Pages, un robot dépose chaque jour les fichiers Cardmarket dans data/.
-// L'appli les lit à l'ouverture, puis toutes les heures tant qu'elle reste ouverte.
-const AUTO = { on: !!window.POKEVAULT_DATA, base: window.POKEVAULT_DATA || '', loadedAt: null, guideDate: null, histCount: 0, error: null };
-function cmApplyHistory(h) {
-  if (!h || !h.products || !Array.isArray(h.fields)) return 0;
-  const fi = Object.fromEntries(h.fields.map((f, i) => [f, i]));
-  let n = 0;
-  for (const [ref, l] of Object.entries(state.cm.links)) {
-    if (!l.id || l.holo || !P(ref)) continue;
-    const pts = h.products[l.id]; if (!pts) continue;
-    const arr = (state.imported[ref] ||= []);
-    for (const r of pts) {
-      const row = { trend: r[fi.trend], avg1: r[fi.avg1], avg7: r[fi.avg7], avg30: r[fi.avg30], low: r[fi.low] };
-      const v = cmPrice(row, state.cm.field, false), d = r[fi.d];
-      if (!(v > 0) || !d || di(d) > T) continue;
-      const i = arr.findIndex(x => x[0] === d), pt = [d, Math.round(v * 100) / 100, 'cm', 0];
-      if (i >= 0) arr[i] = pt; else arr.push(pt);
-    }
-    arr.sort((a, b) => a[0].localeCompare(b[0]));
-    if (arr.length > 400) arr.splice(0, arr.length - 400);
-    n++;
+// Le robot dépose chaque jour dans data/ : products.json (catalogue), latest.json (prix du jour), days/ (relevés quotidiens).
+const AUTO = { on: !!window.POKEVAULT_DATA, base: window.POKEVAULT_DATA || '', guideDate: null, error: null, busy: false, count: 0 };
+function registerProducts(j) {
+  const fi = Object.fromEntries(j.fields.map((f, i) => [f, i]));
+  for (const [id, [fr, en, serie, date]] of Object.entries(j.sets || {})) {
+    const h = hash(id) % 360;
+    SETS['t:' + id] = { fr, en, serie, date, code: id, c: [`hsl(${h} 62% 46%)`, `hsl(${(h + 110) % 360} 52% 32%)`] };
   }
-  return n;
+  EXTRA = j.rows.map(r => {
+    const set = r[fi.set] ? 't:' + r[fi.set] : '';
+    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true };
+  });
+  CMF.catalog = EXTRA.map(p => ({ id: p.cm, name: prodName(p) + (p.en ? ' · ' + p.en : ''), cat: TYPES[p.type] || '', exp: setName(p), t: toks(`${p.name} ${p.en} ${SETS[p.set]?.en || ''} ${setName(p)} ${p.number}`) }));
+  CMF.catalogCount = EXTRA.length;
+  AUTO.count = EXTRA.length;
+  rebuild();
 }
 async function autoLoad(silent) {
-  if (!AUTO.on) return;
-  const get = f => fetch(AUTO.base + f + '?v=' + Date.now(), { cache: 'no-store' }).then(r => r.ok ? r.text() : null).catch(() => null);
-  const [cat, latest, hist] = await Promise.all([CMF.catalog ? Promise.resolve(null) : get('catalog.json'), get('latest.json'), get('history.json')]);
-  if (!latest) { AUTO.error = 'Les prix n’ont pas encore été récupérés par le robot. Lance la mise à jour depuis GitHub (onglet Actions).'; render(); return; }
-  if (cat) cmLoad(cat);
-  let h = null; try { h = hist ? JSON.parse(hist) : null; } catch (e) { h = null; }
-  AUTO.histCount = h ? cmApplyHistory(h) : 0;
-  const r = cmLoad(latest);
-  if (r.kind === 'guide') { AUTO.guideDate = r.date; cmUpdateAll(); }
-  AUTO.loadedAt = Date.now(); AUTO.error = null;
-  rebuild(); Store.save(); render();
-  if (!silent && r.kind === 'guide') toast(`Prix Cardmarket du ${dfr(di(r.date))} chargés`);
+  if (!AUTO.on || AUTO.busy) return;
+  AUTO.busy = true;
+  const getT = f => fetch(AUTO.base + f + '?v=' + Math.floor(Date.now() / 6e5), { cache: 'no-cache' }).then(r => r.ok ? r.text() : null).catch(() => null);
+  const getJ = f => getT(f).then(t => { try { return t ? JSON.parse(t) : null; } catch (e) { return null; } });
+  try {
+    const [prod, latest, idx] = await Promise.all([EXTRA.length ? null : getJ('products.json'), getT('latest.json'), getJ('days/index.json')]);
+    if (prod && prod.rows) registerProducts(prod);
+    if (!latest || !EXTRA.length) { AUTO.error = 'Les données ne sont pas encore prêtes. Lance le robot depuis l’onglet Actions de ton dépôt GitHub.'; render(); return; }
+    const r = cmLoad(latest);
+    if (r.kind === 'guide') AUTO.guideDate = r.date;
+    // Relevés quotidiens : ceux qui manquent depuis la dernière visite, et un relevé par semaine pour les produits nouvellement suivis.
+    const days = (idx && idx.days) || [];
+    state.cm.done ||= {};
+    const tracked = trackedRefs().filter(ref => cmIdOf(ref));
+    const fresh = tracked.filter(ref => !state.cm.done[ref]);
+    const last = state.cm.lastDay || '';
+    const need = new Set(days.filter(d => d > last).slice(-30));
+    if (fresh.length) days.forEach((d, i) => { if ((days.length - 1 - i) % 7 === 0 || i >= days.length - 14) need.add(d); });
+    for (const d of [...need].sort()) {
+      if (di(d) > T) continue;
+      const j = await getJ('days/' + d + '.json'); if (!j || !j.rows) continue;
+      const map = new Map(j.rows.map(x => [x[0], x]));
+      for (const ref of (d > last ? tracked : fresh)) {
+        const x = map.get(cmIdOf(ref)); if (!x) continue;
+        const v = cmPrice({ trend: x[1], avg7: x[2], avg30: x[3], low: x[4] }, state.cm.field, false);
+        if (v > 0) putPoint(ref, d, v);
+      }
+    }
+    fresh.forEach(ref => state.cm.done[ref] = 1);
+    if (days.length) state.cm.lastDay = days[days.length - 1];
+    if (CMF.guide) cmUpdateAll();
+    AUTO.error = null;
+    rebuild(); Store.save(); render();
+    if (!silent && r.kind === 'guide') toast(`Prix Cardmarket du ${dfr(di(r.date))} chargés`);
+  } finally { AUTO.busy = false; }
 }
 
 /* ============ Icônes ============ */
@@ -1112,7 +1169,7 @@ function countUp(el, to) {
 const ui = {
   view: 'total', period: '6M', filter: 'all', donut: 'type', counted: false,
   mtab: 'all', msort: 'pvp', q: '', sel: new Set(),
-  catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catLimit: 60,
+  catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catSetId: '', catLimit: 60,
   pPeriod: '6M', iPeriod: '6M', cmpPeriod: '6M', cmpMode: 'idx',
 };
 const chips = (act, cur, opts, label) => `<div class="chips" role="group" aria-label="${esc(label)}">${opts.map(([v, l, n]) => `<button type="button" class="chip" data-act="${act}" data-v="${v}" aria-pressed="${v === cur}">${esc(l)}${n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>`;
@@ -1120,6 +1177,8 @@ const seg = chips;
 const PERIODS = [['1M', '1M'], ['3M', '3M'], ['6M', '6M'], ['1A', '1A'], ['Tout', 'Tout']];
 const condLabel = (it, p) => p?.kind === 'card' ? (it.grade?.org ? `${it.grade.org} ${it.grade.note}` : COND_CARD[it.cond]?.l || '') : COND_SEALED[it.cond]?.l || '';
 const owned = ref => state.items.filter(it => it.ref === ref && !it.sold).reduce((a, it) => a + it.qty, 0);
+const RAR_FR = { 'common': 'Commune', 'uncommon': 'Peu commune', 'rare': 'Rare', 'rare holo': 'Rare holo', 'double rare': 'Double rare', 'illustration rare': 'Illustration rare', 'special illustration rare': 'Illustration spéciale rare', 'ultra rare': 'Ultra rare', 'hyper rare': 'Hyper rare', 'secret rare': 'Rare secrète', 'shiny rare': 'Rare chromatique', 'shiny ultra rare': 'Ultra rare chromatique', 'amazing rare': 'Rare magnifique', 'radiant rare': 'Rare radieuse', 'ace spec rare': 'ACE SPEC', 'mega hyper rare': 'Méga hyper rare', 'promo': 'Promo' };
+const rarFr = r => RAR_FR[String(r || '').toLowerCase()] || r || '';
 const gainChip = (v, p) => `<span class="gain ${cls(v)}">${eurS(v)}${p != null ? ` (${pct(p)})` : ''}</span>`;
 function alertsTriggered() { return state.alerts.filter(a => { const c = marketAt(a.ref, T); return c != null && (a.op === '>' ? c >= a.price : c <= a.price); }); }
 function srcShort(ref, it) {
@@ -1274,16 +1333,18 @@ VIEWS.mine = function () {
 function catFiltered() {
   const q = ui.catQ.trim().toLowerCase();
   let ps = Object.values(PROD);
+  if (EXTRA.length) ps = ps.filter(p => !p.demo);
+  if (ui.catSetId) ps = ps.filter(p => p.set === ui.catSetId);
   if (ui.catKind) ps = ps.filter(p => p.kind === ui.catKind);
   if (ui.catType) ps = ps.filter(p => p.type === ui.catType);
   if (ui.catLang) ps = ps.filter(p => p.lang === ui.catLang);
-  if (ui.catSerie) ps = ps.filter(p => (SETS[p.set]?.serie || 'Hors catalogue') === ui.catSerie);
-  if (q) ps = ps.filter(p => [prodName(p), setName(p), SETS[p.set]?.en, SETS[p.set]?.code, p.number, p.ean, TYPES[p.type]].filter(Boolean).join(' ').toLowerCase().includes(q));
-  return ps.sort((a, b) => (SETS[b.set]?.date || b.release || '').localeCompare(SETS[a.set]?.date || a.release || '') || a.kind.localeCompare(b.kind) || prodName(a).localeCompare(prodName(b), 'fr'));
+  if (ui.catSerie) ps = ps.filter(p => (SETS[p.set]?.serie || 'Autres produits') === ui.catSerie);
+  if (q) { const qs = norm(q).split(' ').filter(Boolean); ps = ps.filter(p => { const h = norm([prodName(p), p.en, setName(p), SETS[p.set]?.en, SETS[p.set]?.code, p.number, p.ean, TYPES[p.type], p.rarity].filter(Boolean).join(' ')); return qs.every(w => h.includes(w)); }); }
+  return ps.sort((a, b) => (SETS[b.set]?.date || b.release || '').localeCompare(SETS[a.set]?.date || a.release || '') || b.kind.localeCompare(a.kind) || prodName(a).localeCompare(prodName(b), 'fr', { numeric: true }));
 }
 function tile(p) {
   const c = marketAt(p.id, T), v = variation(d => marketAt(p.id, d), 30), o = owned(p.id), w = state.wishlist.some(x => x.ref === p.id), l = state.cm.links[p.id];
-  return `<div class="tile" data-prod="${p.id}" tabindex="0"><button type="button" class="add" data-act="additem" data-ref="${p.id}" aria-label="Ajouter ${esc(prodName(p))} à ma collection">${ICON.plus}</button><div class="stage">${thumb(p, 104)}</div><div class="nm">${esc(prodName(p))}</div><div class="meta">${esc(setName(p))}, ${esc(p.lang)}</div><div class="row"><span class="price">${c == null ? '<span class="muted small">Pas encore de cote</span>' : esc(eur(c))}</span>${c != null ? `<b class="small ${cls(v)}">${pct(v)}</b>` : ''}</div>${o || w || l ? `<div class="flags">${o ? `<span class="tag on">${o} possédé${o > 1 ? 's' : ''}</span>` : ''}${l ? '<span class="tag cm">Cardmarket</span>' : ''}${w ? '<span class="tag">Wishlist</span>' : ''}</div>` : ''}</div>`;
+  return `<div class="tile" data-prod="${p.id}" tabindex="0"><button type="button" class="add" data-act="additem" data-ref="${p.id}" aria-label="Ajouter ${esc(prodName(p))} à ma collection">${ICON.plus}</button><div class="stage">${thumb(p, 104)}</div><div class="nm">${esc(prodName(p))}</div><div class="meta">${esc(setName(p))}${p.auto ? (p.kind === 'card' ? (p.rarity ? `, ${esc(rarFr(p.rarity))}` : '') : `, ${esc(TYPES[p.type] || '')}${p.lang !== 'EU' ? ', ' + esc(LANGS[p.lang] || p.lang) : ''}`) : `, ${esc(p.lang)}`}</div><div class="row"><span class="price">${c == null ? '<span class="muted small">Pas encore de cote</span>' : esc(eur(c))}</span>${c != null ? `<b class="small ${cls(v)}">${pct(v)}</b>` : ''}</div>${o || w || l ? `<div class="flags">${o ? `<span class="tag on">${o} possédé${o > 1 ? 's' : ''}</span>` : ''}${l ? '<span class="tag cm">Cardmarket</span>' : ''}${w ? '<span class="tag">Wishlist</span>' : ''}</div>` : ''}</div>`;
 }
 function catList() {
   const ps = catFiltered();
@@ -1291,14 +1352,20 @@ function catList() {
   return `<p class="muted small" style="margin-bottom:10px">${ps.length} produit${ps.length > 1 ? 's' : ''}</p><div class="grid">${ps.slice(0, ui.catLimit).map(tile).join('')}</div>${ps.length > ui.catLimit ? `<div style="text-align:center;margin-top:18px"><button class="btn" data-act="more">Afficher plus de produits</button></div>` : ''}`;
 }
 VIEWS.catalog = function () {
-  const series = [...new Set(Object.values(PROD).map(p => SETS[p.set]?.serie || 'Hors catalogue'))];
-  return `<div class="page-head"><div><h1>Catalogue</h1><p>${Object.keys(PROD).length} produits sur ${Object.keys(SETS).length} extensions. Clique sur + pour ajouter un produit à ta collection, ou ouvre-le pour voir sa cote.</p></div>
+  const all = Object.values(PROD).filter(p => !EXTRA.length || !p.demo);
+  const sDate = {}; all.forEach(p => { const k = SETS[p.set]?.serie || 'Autres produits', d = SETS[p.set]?.date || ''; if (!(k in sDate) || d > sDate[k]) sDate[k] = d; });
+  const series = Object.keys(sDate).sort((a, b) => sDate[b].localeCompare(sDate[a]));
+  const setsIn = [...new Set(all.filter(p => p.set && (!ui.catSerie || SETS[p.set]?.serie === ui.catSerie)).map(p => p.set))].sort((a, b) => (SETS[b].date || '').localeCompare(SETS[a].date || ''));
+  return `<div class="page-head"><div><h1>Catalogue</h1><p>${EXTRA.length ? `${EXTRA.length.toLocaleString('fr-FR')} produits Cardmarket, chacun avec son prix du jour.` : `${Object.keys(PROD).length} produits sur ${Object.keys(SETS).length} extensions.`} Clique sur + pour ajouter un produit à ta collection, ou ouvre-le pour voir sa cote.</p></div>
   <button class="btn" data-act="custom">${ICON.plus}Produit absent</button></div>
   <div class="toolbar"><input type="search" data-model="catQ" placeholder="Nom, extension, numéro de carte, EAN" value="${esc(ui.catQ)}" aria-label="Rechercher dans le catalogue" autocomplete="off">
   ${chips('catKind', ui.catKind, [['', 'Tout'], ['sealed', 'Scellé'], ['card', 'Cartes']], 'Famille')}
   ${ui.catKind !== 'card' ? `<select data-model="catType" aria-label="Type"><option value="">Tous les types</option>${Object.entries(TYPES).filter(([k]) => k !== 'CARD').map(([k, l]) => `<option value="${k}" ${k === ui.catType ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : ''}
   <select data-model="catLang" aria-label="Langue"><option value="">Toutes les langues</option>${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${k === ui.catLang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
-  <div class="toolbar">${chips('catSerie', ui.catSerie, [['', 'Toutes les séries'], ...series.map(s => [s, s])], 'Série')}</div>
+  <div class="toolbar">${series.length > 8
+    ? `<select data-model="catSerie" aria-label="Série"><option value="">Toutes les séries</option>${series.map(x => `<option ${x === ui.catSerie ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+       <select data-model="catSetId" aria-label="Extension"><option value="">Toutes les extensions</option>${setsIn.map(k => `<option value="${esc(k)}" ${k === ui.catSetId ? 'selected' : ''}>${esc(SETS[k].fr)}</option>`).join('')}</select>`
+    : chips('catSerie', ui.catSerie, [['', 'Toutes les séries'], ...series.map(x => [x, x])], 'Série')}</div>
   <div id="list">${catList()}</div>`;
 };
 
@@ -1332,9 +1399,8 @@ VIEWS.prices = function () {
   const nImp = Object.keys(state.imported).length;
   const step = (n, done, title, text, btn) => `<div class="step ${done ? 'done' : ''}"><span class="n">${done ? '✓' : n}</span><h3>${title}</h3><p>${text}</p>${btn}</div>`;
   return `<div class="page-head"><div><h1>Prix Cardmarket</h1><p>Cardmarket publie chaque jour un guide des prix calculé sur les ventes réellement conclues. Relie tes produits une fois, puis importe le guide du jour : toute ta collection se met à jour d’un coup et chaque import ajoute un point à tes courbes.</p></div></div>
-  ${AUTO.on ? `<div class="banner ${AUTO.error ? 'warn' : ''}">${ICON.tag}<div style="flex:1"><b>${AUTO.error ? 'Mise à jour automatique en attente' : 'Mise à jour automatique activée'}</b><p class="muted small">${AUTO.error ? esc(AUTO.error) : `Prix du ${AUTO.guideDate ? esc(dfr(di(AUTO.guideDate))) : '…'}, récupérés par ton robot GitHub. L’appli les recharge à chaque ouverture et toutes les heures.${CMF.catalog ? ` Catalogue : ${CMF.catalogCount.toLocaleString('fr-FR')} produits.` : ''}`}</p></div><button class="btn sm" data-act="autoreload">Recharger</button></div>
-  <div class="toolbar"><button class="btn primary" data-act="cmauto" ${CMF.catalog && refs.length ? '' : 'disabled'}>Relier automatiquement mes produits</button><span class="muted small">${linked} sur ${refs.length} produit${refs.length > 1 ? 's' : ''} relié${linked > 1 ? 's' : ''}. Clique sur un produit non relié pour le choisir toi-même.</span></div>
-  ${refs.some(r => P(r)?.kind === 'card' && state.cm.links[r]?.id) ? `<p class="muted small" style="margin:-4px 0 16px">L’historique quotidien est gardé pour tout le scellé. Pour tes cartes, <button class="btn sm ghost" data-act="trackedjson">télécharge ta liste de cartes suivies</button> et remplace le fichier <code>data/tracked.json</code> de ton dépôt GitHub.</p>` : ''}` : `<div class="steps">
+  ${AUTO.on ? `<div class="banner ${AUTO.error ? 'warn' : ''}">${ICON.tag}<div style="flex:1"><b>${AUTO.error ? 'Mise à jour automatique en attente' : 'Mise à jour automatique activée'}</b><p class="muted small">${AUTO.error ? esc(AUTO.error) : `Prix Cardmarket du ${AUTO.guideDate ? esc(dfr(di(AUTO.guideDate))) : '…'}, récupérés par ton robot GitHub. Tous les produits du catalogue ont déjà leur prix : il n’y a rien à relier. L’appli recharge les prix à chaque ouverture et toutes les heures.`}</p></div><button class="btn sm" data-act="autoreload">Recharger</button></div>
+  ${refs.some(r => !cmIdOf(r)) ? `<div class="toolbar"><button class="btn primary" data-act="cmauto" ${EXTRA.length ? '' : 'disabled'}>Remplacer mes anciens produits</button><span class="muted small">Certains objets viennent de l’ancien catalogue. L’appli peut les remplacer par leur équivalent Cardmarket ; clique sur ceux qui restent pour choisir toi-même.</span></div>` : ''}` : `<div class="steps">
     ${step(1, !!CMF.catalog, 'Charger le catalogue', CMF.catalog ? `${CMF.catalogCount.toLocaleString('fr-FR')} produits Cardmarket chargés pour cette session.` : 'Le fichier des produits Pokémon de Cardmarket (JSON). Il sert à retrouver chaque produit pour le relier.', `<label class="btn sm">Choisir le fichier<input type="file" accept=".json,application/json" data-cmfile class="sr" multiple></label>`)}
     ${step(2, refs.length && linked === refs.length, 'Relier tes produits', `${linked} sur ${refs.length} produit${refs.length > 1 ? 's' : ''} suivi${refs.length > 1 ? 's' : ''} relié${linked > 1 ? 's' : ''} à Cardmarket.`, `<button class="btn sm" data-act="cmauto" ${CMF.catalog && refs.length ? '' : 'disabled'}>Relier automatiquement</button>`)}
     ${step(3, lastD >= T - 1, 'Importer les prix du jour', lastD >= 0 ? `Derniers prix : ${esc(dfr(lastD))}.` : 'Le guide des prix Pokémon de Cardmarket (JSON), à importer chaque jour.', `<label class="btn sm primary">Importer le guide des prix<input type="file" accept=".json,application/json" data-cmfile class="sr" multiple></label>`)}
@@ -1343,8 +1409,8 @@ VIEWS.prices = function () {
     <select data-model="cmField" style="width:auto">${Object.entries(CM_FIELDS).map(([k, l]) => `<option value="${k}" ${k === state.cm.field ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     <span class="muted small">La tendance est le prix de référence affiché par Cardmarket. Les moyennes portent sur les ventes de la période.</span></div>
   ${refs.length ? `<ul class="list">${refs.map(r => {
-    const p = P(r), l = state.cm.links[r], last = state.cm.last[r];
-    return `<li class="click" data-act="cmlink" data-ref="${r}">${thumb(p, 42)}<div class="grow"><b>${esc(prodName(p))}</b><span class="muted small">${l ? `Relié à « ${esc(l.name)} »` : 'Pas encore relié'}${!ownedRefs.includes(r) ? ', wishlist' : ''}</span></div><div style="text-align:right">${last ? `<b>${esc(eur(cmPrice(last, state.cm.field, false)))}</b><br><span class="muted small">${esc(dfr(di(last.d)))}</span>` : `<span class="tag ${l ? 'cm' : 'low'}">${l ? 'En attente des prix' : 'À relier'}</span>`}</div></li>`;
+    const p = P(r), l = state.cm.links[r], last = state.cm.last[r] || (p.cm && CMF.guide && CMF.guide.get(p.cm) ? { ...CMF.guide.get(p.cm), d: CMF.guideDate } : null);
+    return `<li class="${p.cm ? '' : 'click'}" ${p.cm ? `data-prod="${r}" style="cursor:pointer"` : `data-act="cmlink" data-ref="${r}"`}>${thumb(p, 42)}<div class="grow"><b>${esc(prodName(p))}</b><span class="muted small">${p.cm ? esc(setName(p)) : l ? `Relié à « ${esc(l.name)} »` : (EXTRA.length ? 'Ancien produit : à remplacer' : 'Pas encore relié')}${!ownedRefs.includes(r) ? ', wishlist' : ''}</span></div><div style="text-align:right">${last ? `<b>${esc(eur(cmPrice(last, state.cm.field, false)))}</b><br><span class="muted small">${esc(dfr(di(last.d)))}</span>` : `<span class="tag ${l ? 'cm' : 'low'}">${l ? 'En attente des prix' : 'À relier'}</span>`}</div></li>`;
   }).join('')}</ul>` : '<div class="empty" style="padding:30px 20px"><p>Ajoute d’abord des produits à ta collection ou à ta wishlist.</p></div>'}
   <section class="section" style="margin-top:34px"><h2>Autres sources</h2>
   <p>Sur la fiche de chaque produit, « Cote eBay » calcule la médiane des ventes réussies à partir de la page eBay copiée. Tu peux aussi importer des relevés au format <code>produit;date;prix</code>.</p>
@@ -1365,9 +1431,9 @@ function openCmLink(ref) {
   const q = ui.cmQ ?? cmQuery(p);
   const res = cmSearch(q, p.kind, 10);
   const price = id => { const row = CMF.guide && CMF.guide.get(id); const v = cmPrice(row, state.cm.field, false); return v ? esc(eur(v)) : ''; };
-  openModal(`${modalHead('Relier à Cardmarket', esc(prodName(p)) + ', ' + esc(setName(p)), p)}
+  openModal(`${modalHead(EXTRA.length ? 'Remplacer par le produit Cardmarket' : 'Relier à Cardmarket', esc(prodName(p)) + ', ' + esc(setName(p)), p)}
     ${l ? `<div class="banner" style="margin-bottom:14px"><div style="flex:1"><b>Relié à « ${esc(l.name)} »</b>${l.id ? `<p class="muted small">Produit Cardmarket n° ${l.id}${l.holo ? ', version holo ou reverse' : ''}</p>` : ''}</div><button class="btn sm ghost danger" data-act="cmunlink" data-ref="${ref}">Délier</button></div>` : ''}
-    ${CMF.catalog ? `<label class="f"><span>Rechercher dans le catalogue Cardmarket</span><input type="search" id="cm-q" value="${esc(q)}" autofocus></label>
+    ${CMF.catalog ? `${EXTRA.length ? '<p class="muted small" style="margin-bottom:10px">Choisis le produit correspondant : ton objet sera remplacé par celui-ci, avec son prix et sa courbe automatiques.</p>' : ''}<label class="f"><span>Rechercher dans le catalogue Cardmarket</span><input type="search" id="cm-q" value="${esc(q)}" autofocus></label>
       ${p.kind === 'card' ? `<label style="display:flex;gap:8px;align-items:center;margin-top:10px" class="small"><input type="checkbox" id="cm-holo" class="chk" ${l?.holo ? 'checked' : ''}>Utiliser le prix holo ou reverse</label>` : ''}
       <ul class="list" id="cm-res" style="margin-top:12px">${res.length ? res.map(({ r }) => `<li class="click" data-act="cmpick" data-ref="${ref}" data-id="${r.id}" data-name="${esc(r.name)}"><div class="grow"><b>${esc(r.name)}</b><span class="muted small">${esc([r.exp, r.cat].filter(Boolean).join(', ') || 'n° ' + r.id)}</span></div><b>${price(r.id)}</b></li>`).join('') : '<li><span class="muted">Aucun résultat. Essaie le nom anglais de l’extension ou du produit.</span></li>'}</ul>
       <p class="muted small" style="margin-top:8px">Vérifie que le produit choisi correspond à la bonne langue : selon les produits, Cardmarket peut regrouper plusieurs langues.</p>`
@@ -1404,15 +1470,16 @@ function openProduct(id) {
   const wished = state.wishlist.some(w => w.ref === id);
   const grades = p.kind === 'card' && cur ? [['Near Mint (raw)', 1], ['Excellent (raw)', .78], ['PSA 9', 1.55], ['PSA 10', 3.6], ['BGS 10', 4.5]] : [];
   const used = state.items.some(it => it.ref === id);
-  const sub = [esc(setName(p)) + (SETS[p.set] ? ` (${esc(SETS[p.set].code)})` : ''), esc(LANGS[p.lang] || p.lang), esc(p.kind === 'card' ? p.rarity || 'Carte' : TYPES[p.type]), p.ean ? 'EAN ' + esc(p.ean) : ''].filter(Boolean).join(', ');
+  const sub = [esc(setName(p)) + (SETS[p.set] ? ` (${esc(SETS[p.set].code)})` : ''), esc(LANGS[p.lang] || p.lang), esc(p.kind === 'card' ? rarFr(p.rarity) || 'Carte' : TYPES[p.type]), p.ean ? 'EAN ' + esc(p.ean) : ''].filter(Boolean).join(', ');
   openModal(`${modalHead(prodName(p), sub, p)}
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap"><p class="big-price">${esc(eur(cur))}</p><span class="tag ${src.c}">${esc(src.t)}</span></div>
     <p class="muted small" style="margin-top:4px">${p.kind === 'card' ? 'Prix d’une carte Near Mint non gradée' : 'Prix d’un produit neuf, scellé'}</p>
     <div class="vars"><div>7 jours<b class="${cls(v(7))}">${pct(v(7))}</b></div><div>30 jours<b class="${cls(v(30))}">${pct(v(30))}</b></div><div>1 an<b class="${cls(v(365))}">${pct(v(365))}</b></div>${sinceMsrp != null ? `<div>Depuis la sortie<b class="${cls(sinceMsrp)}">${pct(sinceMsrp)}</b><span class="small">prix conseillé ${esc(eur(p.msrp))}</span></div>` : ''}</div>
     <div class="panel-head" style="margin:14px 0 6px"><h3>Historique du prix</h3>${seg('pPeriod', ui.pPeriod, PERIODS, 'Période')}</div>
-    ${cur == null ? `<div class="empty" style="padding:26px 16px"><p style="margin-bottom:12px">Pas encore de cote pour ce produit. Relie-le à Cardmarket, ou fais un relevé eBay qui reconstitue la courbe des 3 derniers mois.</p><div class="actions"><button class="btn primary" data-act="cmlink" data-ref="${id}">Relier à Cardmarket</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button></div></div>` : chartDiv('prod', { h: 220, aria: 'Historique du prix', series })}
-    ${(() => { const l = state.cm.links[id], last = state.cm.last[id];
-      return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:${last ? 4 : 0}px"><h3>Cardmarket</h3><button class="btn sm" data-act="cmlink" data-ref="${id}">${l ? 'Changer le lien' : 'Relier à Cardmarket'}</button></div>${l ? `<p class="muted small">Relié à « ${esc(l.name)} »${last ? `, prix du ${esc(dfr(di(last.d)))}` : ', en attente du prochain import des prix'}</p>` : '<p class="muted small" style="margin-top:6px">Relie ce produit pour suivre sa tendance et ses moyennes de vente.</p>'}${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`; })()}
+    ${cur != null && pts.filter(x => x.v != null).length < 2 ? `<div class="empty" style="padding:22px 16px"><p style="margin-bottom:12px">La courbe de ce produit se remplit chaque jour dès qu’il est dans ta collection ou ta wishlist.</p><div class="actions"><button class="btn" data-act="wish" data-ref="${id}">${ICON.heart}Suivre dans ma wishlist</button></div></div>` : cur == null ? `<div class="empty" style="padding:26px 16px"><p style="margin-bottom:12px">Pas encore de cote pour ce produit. Relie-le à Cardmarket, ou fais un relevé eBay qui reconstitue la courbe des 3 derniers mois.</p><div class="actions"><button class="btn primary" data-act="cmlink" data-ref="${id}">Relier à Cardmarket</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button></div></div>` : chartDiv('prod', { h: 220, aria: 'Historique du prix', series })}
+    ${(() => { const l = state.cm.links[id], g = p.cm && CMF.guide ? CMF.guide.get(p.cm) : null, last = state.cm.last[id] || (g ? { ...g, d: CMF.guideDate } : null);
+      if (p.cm) return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:4px"><h3>Cardmarket</h3><span class="tag cm">Prix automatique</span></div><p class="muted small">${last ? `Prix du ${esc(dfr(di(last.d)))}` : 'Prix en attente'}${p.lang === 'EU' ? ', toutes langues confondues sur Cardmarket' : ''}${p.en && p.en !== p.name ? `. Nom sur Cardmarket : ${esc(p.en)}` : ''}.</p>${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`;
+      return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:${last ? 4 : 0}px"><h3>Cardmarket</h3><button class="btn sm" data-act="cmlink" data-ref="${id}">${EXTRA.length ? 'Remplacer par le produit Cardmarket' : l ? 'Changer le lien' : 'Relier à Cardmarket'}</button></div>${l ? `<p class="muted small">Relié à « ${esc(l.name)} »${last ? `, prix du ${esc(dfr(di(last.d)))}` : ', en attente du prochain import des prix'}</p>` : '<p class="muted small" style="margin-top:6px">Relie ce produit pour suivre sa tendance et ses moyennes de vente.</p>'}${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`; })()}
     ${grades.length ? `<h3 style="margin:16px 0 8px">Selon l’état et la gradation</h3><dl class="kv">${grades.map(([l, m]) => `<dt>${l}</dt><dd><b>${esc(eur(cur * m))}</b></dd>`).join('')}</dl><p class="muted small" style="margin-top:6px">Estimations par coefficient à partir du prix Near Mint. Importe des relevés gradés pour plus de précision.</p>` : ''}
     ${mine.length ? `<p style="margin-top:14px">Tu en possèdes <b>${mine.reduce((a, it) => a + it.qty, 0)}</b>.</p>` : ''}
     <div class="modal-foot">${p.custom && !used ? `<button class="btn ghost danger" data-act="delcustom" data-ref="${id}">Retirer du catalogue</button>` : ''}<button class="btn" data-act="wish" data-ref="${id}" aria-pressed="${wished}">${ICON.heart}${wished ? 'Dans ta wishlist' : 'Wishlist'}</button><button class="btn" data-act="alert" data-ref="${id}">${ICON.bell}Alerte</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button><button class="btn primary" data-act="additem" data-ref="${id}" autofocus>${ICON.plus}Ajouter à ma collection</button></div>`);
@@ -1483,7 +1550,7 @@ function submitItem(f) {
   const data = { qty, buyPrice: Math.round(price * 100) / 100, buyDate: date, place: String(fd.get('place') || '').trim(), cond: fd.get('cond'), grade: org ? { org, note: String(note) } : null, storage: String(fd.get('storage') || '').trim(), notes: String(fd.get('notes') || '').trim() };
   const id = f.dataset.id;
   if (id) { Object.assign(state.items.find(x => x.id === id), data); closeModal(); commit('Modifications enregistrées'); openItem(id); }
-  else { state.items.push({ id: uid(), ref: f.dataset.ref, manual: null, sold: null, added: Date.now(), ...data }); closeModal(); commit('Ajouté à ta collection'); }
+  else { state.items.push({ id: uid(), ref: f.dataset.ref, manual: null, sold: null, added: Date.now(), ...data }); closeModal(); commit('Ajouté à ta collection'); if (AUTO.on) autoLoad(true); }
 }
 function openSell(id) {
   const it = state.items.find(x => x.id === id); if (!it) return;
@@ -1827,23 +1894,23 @@ const ACT = {
   unmanual: d => { const it = state.items.find(x => x.id === d.id); if (it) it.manual = null; closeModal(); commit('Retour au prix estimé'); openItem(d.id); },
   unsell: d => { const it = state.items.find(x => x.id === d.id); if (it) it.sold = null; closeModal(); commit('Vente annulée'); },
   delitem: (d, el) => { if (!armed(el)) return; state.items = state.items.filter(x => x.id !== d.id); ui.sel.delete(d.id); closeModal(); commit('Objet supprimé'); },
-  wish: d => { const i = state.wishlist.findIndex(w => w.ref === d.ref); if (i >= 0) state.wishlist.splice(i, 1); else state.wishlist.push({ ref: d.ref, added: Date.now() }); commit(i >= 0 ? 'Retiré de la wishlist' : 'Ajouté à la wishlist'); refreshModal(); },
+  wish: d => { const i = state.wishlist.findIndex(w => w.ref === d.ref); if (i >= 0) state.wishlist.splice(i, 1); else state.wishlist.push({ ref: d.ref, added: Date.now() }); commit(i >= 0 ? 'Retiré de la wishlist' : 'Ajouté à la wishlist'); refreshModal(); if (AUTO.on && i < 0) autoLoad(true).then(refreshModal); },
   unwish: d => { state.wishlist = state.wishlist.filter(w => w.ref !== d.ref); commit('Retiré de la wishlist'); },
   alert: d => openAlert(d.ref),
   ebay: d => openEbay(d.ref),
   autoreload: () => autoLoad(false),
   trackedjson: () => { const ids = [...new Set(Object.entries(state.cm.links).filter(([r, l]) => l.id && P(r)?.kind === 'card').map(([, l]) => l.id))]; offerFile('tracked.json', JSON.stringify(ids)); },
   mtab: d => { ui.mtab = d.v; render(); },
-  catSerie: d => { ui.catSerie = d.v; ui.catLimit = 60; render(); },
+  catSerie: d => { ui.catSerie = d.v; ui.catSetId = ''; ui.catLimit = 60; render(); },
   more: () => { ui.catLimit += 60; $('#list').innerHTML = catList(); },
   qty: d => { const it = state.items.find(x => x.id === d.id); if (!it) return; const q = it.qty + +d.v; if (q < 1) { toast('Pour retirer cet objet, ouvre-le puis choisis Supprimer.'); return; } it.qty = q; rebuild(); Store.save(); $('#list').innerHTML = mineList(); },
   cmlink: d => { ui.cmQ = undefined; openCmLink(d.ref); },
-  cmpick: d => { const holo = !!($('#cm-holo') && $('#cm-holo').checked); state.cm.links[d.ref] = { id: +d.id, name: d.name, holo }; let msg = 'Produit relié à Cardmarket'; if (AUTO.on) setTimeout(() => autoLoad(true), 50); if (CMF.guide && cmApply(d.ref, CMF.guide.get(+d.id), CMF.guideDate)) msg += ', prix mis à jour'; closeModal(); modalCtx = null; commit(msg); },
+  cmpick: d => { if (EXTRA.length && PROD['cm' + d.id]) { migrateRef(d.ref, 'cm' + d.id); closeModal(); modalCtx = null; commit('Produit remplacé par sa version Cardmarket'); autoLoad(true); return; } const holo = !!($('#cm-holo') && $('#cm-holo').checked); state.cm.links[d.ref] = { id: +d.id, name: d.name, holo }; let msg = 'Produit relié à Cardmarket'; if (AUTO.on) setTimeout(() => autoLoad(true), 50); if (CMF.guide && cmApply(d.ref, CMF.guide.get(+d.id), CMF.guideDate)) msg += ', prix mis à jour'; closeModal(); modalCtx = null; commit(msg); },
   cmunlink: d => { delete state.cm.links[d.ref]; delete state.cm.last[d.ref]; closeModal(); modalCtx = null; commit('Lien Cardmarket retiré'); },
   cmauto: () => {
     const refs = [...new Set([...state.items.filter(isHeld).map(it => it.ref), ...state.wishlist.map(w => w.ref)])];
     const r = cmAutoLink(refs); if (AUTO.on) { autoLoad(true); } else if (CMF.guide) cmUpdateAll();
-    commit(`${r.linked} produit${r.linked > 1 ? 's' : ''} relié${r.linked > 1 ? 's' : ''} automatiquement${r.unsure ? `, ${r.unsure} à relier à la main` : ''}`);
+    commit(EXTRA.length ? `${r.linked} produit${r.linked > 1 ? 's' : ''} remplacé${r.linked > 1 ? 's' : ''}${r.unsure ? `, ${r.unsure} à choisir à la main` : ''}` : `${r.linked} produit${r.linked > 1 ? 's' : ''} relié${r.linked > 1 ? 's' : ''} automatiquement${r.unsure ? `, ${r.unsure} à relier à la main` : ''}`);
   },
   cmpagesave: () => {
     if (!EB_CM) return;
@@ -1902,7 +1969,13 @@ document.addEventListener('change', e => {
     if (t.checked) { if (ui.sel.size >= 8) { t.checked = false; toast('8 objets maximum dans une comparaison.'); return; } ui.sel.add(t.dataset.sel); } else ui.sel.delete(t.dataset.sel);
     const scroll = scrollY; render(); scrollTo(0, scroll); return;
   }
-  if (t.matches('select[data-model="cmField"]')) { state.cm.field = t.value; if (CMF.guide) cmUpdateAll(); commit('Valeur retenue : ' + CM_FIELDS[t.value]); return; }
+  if (t.matches('select[data-model="cmField"]')) {
+    state.cm.field = t.value;
+    if (AUTO.on) { for (const ref of Object.keys(state.imported)) { state.imported[ref] = state.imported[ref].filter(x => x[2] !== 'cm'); if (!state.imported[ref].length) delete state.imported[ref]; } state.cm.done = {}; state.cm.lastDay = ''; commit('Valeur retenue : ' + CM_FIELDS[t.value] + '. Courbes en cours de mise à jour…'); autoLoad(true); return; }
+    if (CMF.guide) cmUpdateAll(); commit('Valeur retenue : ' + CM_FIELDS[t.value]); return;
+  }
+  if (t.matches('select[data-model="catSerie"]')) { ui.catSerie = t.value; ui.catSetId = ''; ui.catLimit = 60; render(); return; }
+  if (t.matches('select[data-model="catSetId"]')) { ui.catSetId = t.value; ui.catLimit = 60; render(); return; }
   if (t.matches('select[data-model]')) { ui[t.dataset.model] = t.value; render(); return; }
   if (t.matches('input[data-inline="buy"]')) {
     const it = state.items.find(x => x.id === t.dataset.id), v = num(t.value);
