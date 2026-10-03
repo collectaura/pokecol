@@ -386,4 +386,70 @@ const days = fs.readdirSync(`${DIR}/days`).filter(f => /^\d{4}-\d{2}-\d{2}\.json
 for (const f of days.slice(0, Math.max(0, days.length - KEEP_DAYS))) fs.unlinkSync(`${DIR}/days/${f}`);
 write(`${DIR}/days/index.json`, { days: days.slice(-KEEP_DAYS).map(f => f.slice(0, 10)) });
 for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.existsSync(`${DIR}/${old}`)) fs.unlinkSync(`${DIR}/${old}`);
+
+/* ---------- 5. Historique long du scellé, depuis février 2024 (archive TCGCSV des prix TCGplayer) ---------- */
+// Une fois par semaine de février 2024 au 16 septembre 2026 : prix du marché TCGplayer (dollars), ramené au niveau
+// du prix Cardmarket actuel du même produit. Le travail est réparti sur plusieurs passages du robot (limite de temps).
+// Fichiers communs à tous les visiteurs : data/longhist/tcg-<n>.json (n = identifiant Cardmarket modulo 32).
+{
+  const LH = `${DIR}/longhist`, SH = 32, T0 = Date.now(), BUDGET = 14 * 60e3;
+  fs.mkdirSync(LH, { recursive: true });
+  const meta = readJSON(`${LH}/meta.json`, { v: 1, done: [], ref: null });
+  const raw = readJSON(`${LH}/raw.json`, {});                   // { tcgId: [[date, usd], ...] }
+  const targets = new Map();
+  for (const r of sealed) if (r[10] && /^\d+$/.test(String(r[10]))) targets.set(Number(r[10]), r[0]);
+  const ymd = t => new Date(t).toISOString().slice(0, 10);
+  const want = []; for (let t = Date.UTC(2024, 1, 8); t < Date.UTC(2026, 8, 16); t += 7 * 864e5) want.push(ymd(t));
+  const refDue = !meta.ref || Date.now() - Date.parse(meta.ref.date) > 7 * 864e5;
+  const refDate = ymd(Date.now() - 864e5);
+  const todo = want.filter(d => !meta.done.includes(d));
+  if (refDue) todo.unshift(refDate);
+  let have7z = true;
+  try { execSync('7z i', { stdio: 'ignore' }); } catch { try { execSync('sudo apt-get install -y -qq p7zip-full', { stdio: 'ignore' }); } catch { have7z = false; } }
+  let processed = 0, changed = false;
+  if (have7z && targets.size && todo.length) {
+    for (const d of todo) {
+      if (Date.now() - T0 > BUDGET) break;
+      const arc = '/tmp/pv-prices.7z', out = '/tmp/pv-prices';
+      try {
+        const res = await fetch(`${process.env.ARCHIVE_BASE || 'https://tcgcsv.com/archive/tcgplayer'}/prices-${d}.ppmd.7z`, { headers: { 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' } });
+        if (!res.ok) { if (res.status === 404 && d !== refDate) meta.done.push(d); continue; }   // jour absent de l'archive : on passe
+        fs.writeFileSync(arc, Buffer.from(await res.arrayBuffer()));
+        fs.rmSync(out, { recursive: true, force: true });
+        execSync(`7z x -y -bd -o${out} ${arc}`, { stdio: 'ignore' });
+        const base = fs.readdirSync(out).map(x => path.join(out, x, '3')).find(p => fs.existsSync(p));
+        const day = {};
+        if (base) for (const g of fs.readdirSync(base)) {
+          const f = path.join(base, g, 'prices'); if (!fs.existsSync(f)) continue;
+          let j; try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
+          for (const p of j.results || []) {
+            if (!targets.has(p.productId) || day[p.productId] != null) continue;
+            const v = p.marketPrice ?? p.midPrice; if (v > 0) day[p.productId] = Math.round(v * 100) / 100;
+          }
+        }
+        if (d === refDate) meta.ref = { date: d, prices: day };
+        else { for (const [pid, v] of Object.entries(day)) (raw[pid] ||= []).push([d, v]); meta.done.push(d); }
+        processed++; changed = true;
+      } catch (e) { console.log(`Historique long : ${d} ignoré (${e.message}).`); }
+      finally { fs.rmSync(arc, { force: true }); fs.rmSync(out, { recursive: true, force: true }); }
+    }
+  }
+  if (changed || !fs.existsSync(`${LH}/tcg-0.json`)) {
+    // Mise à l'échelle : prix Cardmarket du jour / prix TCGplayer de référence, appliqué à toute la courbe américaine.
+    const shards = Array.from({ length: SH }, () => ({}));
+    let n = 0;
+    for (const [pid, cm] of targets) {
+      const pts = raw[pid]; const refUsd = meta.ref && meta.ref.prices[pid]; const cmNow = price.get(cm)?.[0];
+      if (!pts || !pts.length || !(refUsd > 0) || !(cmNow > 0)) continue;
+      const k = cmNow / refUsd; if (k < .2 || k > 5) continue;                       // correspondance douteuse : écartée
+      shards[cm % SH][cm] = pts.sort((a, b) => a[0].localeCompare(b[0])).map(([d, v]) => [d, Math.round(v * k * 100) / 100]);
+      n++;
+    }
+    shards.forEach((o, i) => write(`${LH}/tcg-${i}.json`, o));
+    write(`${LH}/raw.json`, raw);
+    meta.n = meta.done.length; meta.products = n; meta.at = new Date().toISOString();
+    write(`${LH}/meta.json`, meta);
+    console.log(`Historique long : ${processed} semaines ajoutées (${meta.done.length}/${want.length} au total), ${n} produits scellés avec un historique depuis 2024.`);
+  } else console.log(`Historique long : complet (${meta.done.length}/${want.length} semaines).`);
+}
 console.log(`Catalogue de l'appli : ${products.length} produits. Relevés conservés : ${Math.min(days.length, KEEP_DAYS)} jours.`);
