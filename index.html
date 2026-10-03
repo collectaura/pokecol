@@ -1211,6 +1211,7 @@ function chartDiv(id, spec) { CH[id] = spec; return `<div class="chart" data-cha
 function mountCharts(root = document) { $$('[data-chart]', root).forEach(el => { const s = CH[el.dataset.chart]; if (s) drawLine(el, s); }); }
 function yfmt(v, f) {
   if (f === 'idx') return v.toLocaleString('fr-FR', { maximumFractionDigits: 0 });
+  if (Math.abs(v) < 0.005) return '0 €';
   if (Math.abs(v) >= 10000) return (v / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 }) + '\u00a0k€';
   if (Math.abs(v) >= 100) return NF0.format(v);
   return NF2.format(v);
@@ -1223,7 +1224,12 @@ function drawLine(el, spec) {
   for (const s of ser) for (const p of s.pts) { if (p.d < d0) d0 = p.d; if (p.d > d1) d1 = p.d; if (p.v < y0) y0 = p.v; if (p.v > y1) y1 = p.v; }
   if (spec.zeroBase && y0 > 0) y0 = 0;
   if (y0 === y1) { y0 -= 1; y1 += 1; }
-  const py = (y1 - y0) * .08; y0 = spec.zeroBase ? y0 : y0 - py; y1 += py;
+  if (spec.zeroBase) {
+    // Échelle à partir de zéro, avec des paliers ronds (0, 1 500, 3 000, 4 500…).
+    const raw = y1 * 1.05 / 3, p10 = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 1.5, 2, 2.5, 3, 4, 5, 10].map(k => k * p10).find(v => v >= raw) || 10 * p10;
+    y1 = step * 3;
+  } else { const py = (y1 - y0) * .08; y0 -= py; y1 += py; }
   if (d1 === d0) d1 = d0 + 1;
   const iw = W - pl - pr, ih = H - pt - pb;
   const X = d => pl + (d - d0) / (d1 - d0) * iw, Y = v => pt + (1 - (v - y0) / (y1 - y0)) * ih;
@@ -1418,7 +1424,7 @@ VIEWS.total = function () {
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
   const vs = t.vs;
   CH.main = {
-    h: 300, noTip: true, aria: 'Évolution de la valeur de la collection',
+    h: 300, noTip: true, zeroBase: true, aria: 'Évolution de la valeur de la collection',
     series: estOn
       ? [{ label: 'Estimation', color: 'var(--accent)', pts: vs.val.filter(p => p.d <= est), dot: true }, { label: 'Valeur', color: 'var(--accent)', pts: vs.val.filter(p => p.d >= est), area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }]
       : [{ label: 'Valeur', color: 'var(--accent)', pts: vs.val, area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }],
