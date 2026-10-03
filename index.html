@@ -499,7 +499,7 @@ const CATALOG = [
 ];
 
 /* ============ État persistant ============ */
-const DEFAULT_STATE = () => ({ v: 1, items: [], wishlist: [], alerts: [], imported: {}, custom: [], ebayQ: {}, cm: { links: {}, last: {}, field: 'trend', done: {}, lastDay: '' }, settings: { theme: 'dark', demo: false } });
+const DEFAULT_STATE = () => ({ v: 1, items: [], wishlist: [], alerts: [], imported: {}, custom: [], ebayQ: {}, cm: { links: {}, last: {}, field: 'trend', done: {}, lastDay: '', mirror: {} }, settings: { theme: 'dark', demo: false } });
 let state = DEFAULT_STATE();
 function normalize(s) {
   const d = DEFAULT_STATE();
@@ -560,17 +560,21 @@ const prodName = p => p ? (p.kind === 'card' ? `${p.name} ${p.number || ''}`.tri
 // Prix de marché de référence (neuf / Near Mint raw) d'un produit à un jour donné.
 // Relevés réels : interpolation linéaire entre deux relevés, valeur figée après le dernier.
 // L'historique de démonstration n'est utilisé que si l'option est activée.
+let PREV = {};      // aperçu d'historique (non enregistré) pour les produits consultés dans le catalogue
+function seriesAt(arr, d) {
+  let i = 0;
+  while (i + 1 < arr.length && arr[i + 1][0] <= d) i++;
+  if (i === arr.length - 1 || arr[i][0] === d) return arr[i][1];
+  const [x0, y0] = arr[i], [x1, y1] = arr[i + 1];
+  return Math.round((y0 + (y1 - y0) * (d - x0) / (x1 - x0)) * 100) / 100;
+}
 function marketAt(ref, d) {
   const imp = IMP[ref];
-  if (imp && d >= imp[0][0]) {
-    let i = 0;
-    while (i + 1 < imp.length && imp[i + 1][0] <= d) i++;
-    if (i === imp.length - 1 || imp[i][0] === d) return imp[i][1];
-    const [x0, y0] = imp[i], [x1, y1] = imp[i + 1];
-    return Math.round((y0 + (y1 - y0) * (d - x0) / (x1 - x0)) * 100) / 100;
-  }
+  if (imp && d >= imp[0][0]) return seriesAt(imp, d);
   const cid = PROD[ref] && PROD[ref].cm;
   if (cid && d >= T && typeof CMF !== 'undefined' && CMF.guide) { const v = cmPrice(CMF.guide.get(cid), state.cm.field, false); return v > 0 ? v : null; }
+  const pv = PREV[ref];
+  if (pv && pv.length && d >= pv[0][0]) return seriesAt(pv, d);
   if (!state.settings.demo || cid) return null;
   const s = SER[ref];
   if (!s || d < s.start) return null;
@@ -596,6 +600,12 @@ function unitAt(it, d) {
   const base = marketAt(it.ref, d);
   if (base == null) return it.buyPrice;
   return Math.round(base * mult(it, P(it.ref)) * 100) / 100;
+}
+// Prix de marché d'un objet (sans repli sur le prix d'achat) : sert aux courbes et aux variations.
+function marketUnit(it, d) {
+  if (it.manual && d >= clampDay(di(it.manual.date))) return it.manual.price;
+  const base = marketAt(it.ref, d);
+  return base == null ? null : Math.round(base * mult(it, P(it.ref)) * 100) / 100;
 }
 function variation(fn, k) { const a = fn(T - k), b = fn(T); return a ? b / a - 1 : null; }
 // Source et indice de confiance du prix affiché.
@@ -664,9 +674,9 @@ function valueSeries(from, filter) {
 function rowData(it) {
   const p = P(it.ref);
   const u = unitAt(it, T);
-  const u30 = unitAt(it, T - 30);
+  const u30 = marketUnit(it, T - 30);
   const spark = [];
-  for (let d = T - 30; d <= T; d++) spark.push(unitAt(it, d));
+  for (let d = T - 30; d <= T; d++) spark.push(marketUnit(it, d));
   return {
     it, p, u, tot: u * it.qty, pv: (u - it.buyPrice) * it.qty, pvp: it.buyPrice ? u / it.buyPrice - 1 : null,
     v30: u30 ? u / u30 - 1 : null, spark, name: prodName(p), set: setName(p),
@@ -826,8 +836,8 @@ function cmApply(ref, row, date) {
   const d = di(date);
   const first = !arr.some(x => x[2] === 'cm' && di(x[0]) <= d - 10);
   if (first && !link.holo) {
-    if (row.avg30 > 0 && d - 15 >= 0 && !arr.some(x => x[0] === ds(d - 15))) put([ds(d - 15), row.avg30, 'cm', 0]);
-    if (row.avg7 > 0 && d - 3 >= 0 && !arr.some(x => x[0] === ds(d - 3))) put([ds(d - 3), row.avg7, 'cm', 0]);
+    if (row.avg30 > 0 && d - 15 >= 0 && !arr.some(x => x[0] === ds(d - 15))) put([ds(d - 15), row.avg30, 'cm', -1]);
+    if (row.avg7 > 0 && d - 3 >= 0 && !arr.some(x => x[0] === ds(d - 3))) put([ds(d - 3), row.avg7, 'cm', -1]);
   }
   put([date, Math.round(v * 100) / 100, 'cm', 0]);
   arr.sort((a, b) => a[0].localeCompare(b[0]));
@@ -921,6 +931,32 @@ function registerProducts(j) {
   AUTO.count = EXTRA.length;
   rebuild();
 }
+// Archive publique du guide des prix Cardmarket (un relevé par jour depuis le 16 septembre 2026),
+// découpée en petits fichiers : on ne télécharge que ceux des produits suivis.
+const MIRROR = 'https://raw.githubusercontent.com/ZyzyThePizi/pokemon-price-data/main/';
+let MFIELDS = ['date', 'low', 'trend', 'avg1', 'avg7', 'avg30', 'lowHolo', 'trendHolo', 'avg30Holo'];
+let mfLoaded = null;
+const SHARDS = new Map();
+const shardOf = n => { if (!SHARDS.has(n)) SHARDS.set(n, fetch(MIRROR + 'history/' + n + '.json').then(r => r.ok ? r.json() : null).catch(() => null)); return SHARDS.get(n); };
+async function mirrorSeries(id) {
+  if (!mfLoaded) mfLoaded = fetch(MIRROR + 'prices/manifest.json').then(r => r.ok ? r.json() : null).then(m => { if (m && Array.isArray(m.historyFields)) MFIELDS = m.historyFields; }).catch(() => {});
+  await mfLoaded;
+  const j = await shardOf(id % 1000);
+  const rows = j && j[String(id)];
+  if (!rows) return [];
+  const fi = Object.fromEntries(MFIELDS.map((f, i) => [f, i]));
+  return rows.map(r => [r[fi.date], cmPrice({ trend: r[fi.trend], avg1: r[fi.avg1], avg7: r[fi.avg7], avg30: r[fi.avg30], low: r[fi.low] }, state.cm.field, false)])
+    .filter(([d, v]) => d && v > 0 && di(d) <= T);
+}
+// Aperçu de la courbe d'un produit du catalogue, même s'il n'est pas dans la collection.
+async function previewProduct(ref) {
+  const p = P(ref); if (!p || !p.cm || IMP[ref] || PREV[ref]) return false;
+  PREV[ref] = [];
+  const s = await mirrorSeries(p.cm);
+  if (!s.length) return false;
+  PREV[ref] = s.map(([d, v]) => [di(d), v]).sort((a, b) => a[0] - b[0]);
+  return true;
+}
 async function autoLoad(silent) {
   if (!AUTO.on || AUTO.busy) return;
   AUTO.busy = true;
@@ -951,6 +987,17 @@ async function autoLoad(silent) {
       }
     }
     fresh.forEach(ref => state.cm.done[ref] = 1);
+    // Complète le passé avec l'archive publique (une seule fois par produit, sans écraser les relevés du robot).
+    state.cm.mirror ||= {};
+    for (const ref of tracked.filter(r => !state.cm.mirror[r])) {
+      const s = await mirrorSeries(cmIdOf(ref));
+      const have = new Set((state.imported[ref] || []).filter(x => x[2] === 'cm' && x[3] !== -1).map(x => x[0]));
+      // les points estimés (moyennes 7 et 30 jours) laissent la place aux vrais relevés
+      if (s.length && state.imported[ref]) state.imported[ref] = state.imported[ref].filter(x => !(x[2] === 'cm' && x[3] === -1));
+      for (const [d, v] of s) if (!have.has(d)) putPoint(ref, d, v);
+      state.cm.mirror[ref] = 1;
+      delete PREV[ref];
+    }
     if (days.length) state.cm.lastDay = days[days.length - 1];
     if (CMF.guide) cmUpdateAll();
     AUTO.error = null;
@@ -1463,7 +1510,7 @@ function openProduct(id) {
   const pts = []; for (let d = start; d <= T; d++) pts.push({ d, v: marketAt(id, d) });
   const mine = state.items.filter(it => it.ref === id && !it.sold);
   const avgBuy = mine.length ? mine.reduce((a, it) => a + it.buyPrice * it.qty, 0) / mine.reduce((a, it) => a + it.qty, 0) : null;
-  const series = [{ label: p.kind === 'card' ? 'Prix Near Mint' : 'Prix neuf', color: 'var(--gold)', pts, area: true }];
+  const series = [{ label: p.kind === 'card' ? 'Prix Near Mint' : 'Prix neuf', color: 'var(--accent)', pts, area: true }];
   if (avgBuy != null && p.kind === 'sealed') series.push({ label: 'Ton prix d’achat moyen', color: 'var(--muted)', pts: pts.map(x => ({ d: x.d, v: avgBuy })), dash: true });
   const v = k => variation(d => marketAt(id, d), k);
   const sinceMsrp = p.msrp && cur ? cur / p.msrp - 1 : null;
@@ -1476,7 +1523,7 @@ function openProduct(id) {
     <p class="muted small" style="margin-top:4px">${p.kind === 'card' ? 'Prix d’une carte Near Mint non gradée' : 'Prix d’un produit neuf, scellé'}</p>
     <div class="vars"><div>7 jours<b class="${cls(v(7))}">${pct(v(7))}</b></div><div>30 jours<b class="${cls(v(30))}">${pct(v(30))}</b></div><div>1 an<b class="${cls(v(365))}">${pct(v(365))}</b></div>${sinceMsrp != null ? `<div>Depuis la sortie<b class="${cls(sinceMsrp)}">${pct(sinceMsrp)}</b><span class="small">prix conseillé ${esc(eur(p.msrp))}</span></div>` : ''}</div>
     <div class="panel-head" style="margin:14px 0 6px"><h3>Historique du prix</h3>${seg('pPeriod', ui.pPeriod, PERIODS, 'Période')}</div>
-    ${cur != null && pts.filter(x => x.v != null).length < 2 ? `<div class="empty" style="padding:22px 16px"><p style="margin-bottom:12px">La courbe de ce produit se remplit chaque jour dès qu’il est dans ta collection ou ta wishlist.</p><div class="actions"><button class="btn" data-act="wish" data-ref="${id}">${ICON.heart}Suivre dans ma wishlist</button></div></div>` : cur == null ? `<div class="empty" style="padding:26px 16px"><p style="margin-bottom:12px">Pas encore de cote pour ce produit. Relie-le à Cardmarket, ou fais un relevé eBay qui reconstitue la courbe des 3 derniers mois.</p><div class="actions"><button class="btn primary" data-act="cmlink" data-ref="${id}">Relier à Cardmarket</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button></div></div>` : chartDiv('prod', { h: 220, aria: 'Historique du prix', series })}
+    ${cur != null && pts.filter(x => x.v != null).length < 2 ? `<div class="empty" style="padding:22px 16px"><p style="margin-bottom:12px">${AUTO.on && p.cm && !PREV[id] ? 'Chargement de l’historique du prix…' : 'La courbe de ce produit se remplit chaque jour dès qu’il est dans ta collection ou ta wishlist.'}</p><div class="actions"><button class="btn" data-act="wish" data-ref="${id}">${ICON.heart}Suivre dans ma wishlist</button></div></div>` : cur == null ? `<div class="empty" style="padding:26px 16px"><p style="margin-bottom:12px">Pas encore de cote pour ce produit. Relie-le à Cardmarket, ou fais un relevé eBay qui reconstitue la courbe des 3 derniers mois.</p><div class="actions"><button class="btn primary" data-act="cmlink" data-ref="${id}">Relier à Cardmarket</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button></div></div>` : chartDiv('prod', { h: 220, aria: 'Historique du prix', series })}
     ${(() => { const l = state.cm.links[id], g = p.cm && CMF.guide ? CMF.guide.get(p.cm) : null, last = state.cm.last[id] || (g ? { ...g, d: CMF.guideDate } : null);
       if (p.cm) return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:4px"><h3>Cardmarket</h3><span class="tag cm">Prix automatique</span></div><p class="muted small">${last ? `Prix du ${esc(dfr(di(last.d)))}` : 'Prix en attente'}${p.lang === 'EU' ? ', toutes langues confondues sur Cardmarket' : ''}${p.en && p.en !== p.name ? `. Nom sur Cardmarket : ${esc(p.en)}` : ''}.</p>${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`;
       return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:${last ? 4 : 0}px"><h3>Cardmarket</h3><button class="btn sm" data-act="cmlink" data-ref="${id}">${EXTRA.length ? 'Remplacer par le produit Cardmarket' : l ? 'Changer le lien' : 'Relier à Cardmarket'}</button></div>${l ? `<p class="muted small">Relié à « ${esc(l.name)} »${last ? `, prix du ${esc(dfr(di(last.d)))}` : ', en attente du prochain import des prix'}</p>` : '<p class="muted small" style="margin-top:6px">Relie ce produit pour suivre sa tendance et ses moyennes de vente.</p>'}${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`; })()}
@@ -1484,6 +1531,7 @@ function openProduct(id) {
     ${mine.length ? `<p style="margin-top:14px">Tu en possèdes <b>${mine.reduce((a, it) => a + it.qty, 0)}</b>.</p>` : ''}
     <div class="modal-foot">${p.custom && !used ? `<button class="btn ghost danger" data-act="delcustom" data-ref="${id}">Retirer du catalogue</button>` : ''}<button class="btn" data-act="wish" data-ref="${id}" aria-pressed="${wished}">${ICON.heart}${wished ? 'Dans ta wishlist' : 'Wishlist'}</button><button class="btn" data-act="alert" data-ref="${id}">${ICON.bell}Alerte</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button><button class="btn primary" data-act="additem" data-ref="${id}" autofocus>${ICON.plus}Ajouter à ma collection</button></div>`);
   modalCtx = { kind: 'prod', id };
+  if (AUTO.on && p.cm && !IMP[id] && !PREV[id]) previewProduct(id).then(ok => { if (ok && modalCtx && modalCtx.kind === 'prod' && modalCtx.id === id) openProduct(id); });
 }
 let modalCtx = null;
 
@@ -1493,18 +1541,20 @@ function openItem(id) {
   const r = rowData(it), p = r.p, src = sourceOf(it.ref, it);
   const buyD = clampDay(di(it.buyDate));
   const endD = it.sold ? clampDay(di(it.sold.date)) : T;
-  const from = ui.iPeriod === 'Tout' ? Math.max(0, Math.min(buyD, T - 30)) : periodFrom(ui.iPeriod);
+  const firstMkt = (IMP[it.ref] && IMP[it.ref][0][0]) ?? T;
+  const from = ui.iPeriod === 'Tout' ? Math.max(0, Math.min(buyD, firstMkt, T - 30)) : periodFrom(ui.iPeriod);
   const pts = [], buy = [];
-  for (let d = from; d <= T; d++) { pts.push({ d, v: unitAt(it, d) }); if (d >= buyD && d <= endD) buy.push({ d, v: it.buyPrice }); }
-  const v = k => variation(d => unitAt(it, d), k);
+  for (let d = from; d <= T; d++) { pts.push({ d, v: marketUnit(it, d) }); if (d >= buyD && d <= endD) buy.push({ d, v: it.buyPrice }); }
+  const v = k => variation(d => marketUnit(it, d), k);
+  const nMkt = pts.filter(x => x.v != null).length;
   const sub = [esc(r.set), esc(LANGS[p?.lang] || ''), esc(condLabel(it, p))].filter(Boolean).join(', ');
   const realized = it.sold ? (it.sold.price - it.buyPrice) * it.qty : null;
   openModal(`${modalHead(r.name, sub, p)}
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap"><p class="big-price">${esc(eur(it.sold ? it.sold.price : r.u))}</p><span class="muted">${it.sold ? 'prix de vente unitaire' : `l’unité, soit ${esc(eur(r.tot))} pour ${it.qty}`}</span>${it.sold ? '' : `<span class="tag ${src.c}">${esc(src.t)}</span>`}</div>
     <p style="margin-top:8px;font-weight:600" class="${cls(it.sold ? realized : r.pv)}">${it.sold ? `${eurS(realized)} de gain réalisé` : `${eurS(r.pv)} (${pct(r.pvp)}) de plus-value latente`}</p>
     <div class="vars"><div>7 jours<b class="${cls(v(7))}">${pct(v(7))}</b></div><div>30 jours<b class="${cls(v(30))}">${pct(v(30))}</b></div><div>1 an<b class="${cls(v(365))}">${pct(v(365))}</b></div></div>
-    <div class="panel-head" style="margin:14px 0 6px"><h3>Valeur unitaire</h3>${seg('iPeriod', ui.iPeriod, PERIODS, 'Période')}</div>
-    ${chartDiv('item', { h: 220, aria: 'Évolution de la valeur unitaire', series: [{ label: 'Valeur', color: 'var(--gold)', pts, area: true }, { label: 'Prix d’achat', color: 'var(--muted)', pts: buy, dash: true }] })}
+    <div class="panel-head" style="margin:14px 0 6px"><h3>Prix du marché</h3>${seg('iPeriod', ui.iPeriod, PERIODS, 'Période')}</div>
+    ${nMkt >= 2 ? chartDiv('item', { h: 220, aria: 'Évolution du prix du marché', series: [{ label: 'Prix du marché', color: 'var(--accent)', pts, area: true }, { label: 'Ton prix d’achat', color: 'var(--muted)', pts: buy, dash: true }] }) + '<div class="legend"><span><i style="background:var(--accent)"></i>Prix du marché</span><span><i class="dash"></i>Ton prix d’achat</span></div>' : `<div class="empty" style="padding:22px 16px"><p>${AUTO.on ? 'L’historique de ce produit est en cours de chargement. Il apparaîtra dans quelques secondes.' : 'Pas encore d’historique de prix pour ce produit.'}</p></div>`}
     <dl class="kv">
       <dt>Acheté le</dt><dd>${esc(dfr(di(it.buyDate)))}${it.place ? `, ${esc(it.place)}` : ''}</dd>
       <dt>Prix d’achat</dt><dd>${esc(eur(it.buyPrice))} l’unité, ${it.qty} exemplaire${it.qty > 1 ? 's' : ''}</dd>
@@ -1971,7 +2021,7 @@ document.addEventListener('change', e => {
   }
   if (t.matches('select[data-model="cmField"]')) {
     state.cm.field = t.value;
-    if (AUTO.on) { for (const ref of Object.keys(state.imported)) { state.imported[ref] = state.imported[ref].filter(x => x[2] !== 'cm'); if (!state.imported[ref].length) delete state.imported[ref]; } state.cm.done = {}; state.cm.lastDay = ''; commit('Valeur retenue : ' + CM_FIELDS[t.value] + '. Courbes en cours de mise à jour…'); autoLoad(true); return; }
+    if (AUTO.on) { for (const ref of Object.keys(state.imported)) { state.imported[ref] = state.imported[ref].filter(x => x[2] !== 'cm'); if (!state.imported[ref].length) delete state.imported[ref]; } state.cm.done = {}; state.cm.lastDay = ''; state.cm.mirror = {}; PREV = {}; commit('Valeur retenue : ' + CM_FIELDS[t.value] + '. Courbes en cours de mise à jour…'); autoLoad(true); return; }
     if (CMF.guide) cmUpdateAll(); commit('Valeur retenue : ' + CM_FIELDS[t.value]); return;
   }
   if (t.matches('select[data-model="catSerie"]')) { ui.catSerie = t.value; ui.catSetId = ''; ui.catLimit = 60; render(); return; }
