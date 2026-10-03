@@ -66,7 +66,9 @@ for (const serieFile of fs.readdirSync(DATA).filter(f => f.endsWith('.ts'))) {
   const serieName = serieFile.slice(0, -3);
   const serieDir = path.join(DATA, serieName);
   if (!fs.existsSync(serieDir)) continue;
-  const serie = topName(read(path.join(DATA, serieFile)));
+  const serieTxt = read(path.join(DATA, serieFile));
+  const serie = topName(serieTxt);
+  const serieId = (serieTxt.match(/\n\tid\s*:\s*["']([^"']+)["']/) || [])[1] || '';
   for (const setFile of fs.readdirSync(serieDir).filter(f => f.endsWith('.ts'))) {
     const st = read(path.join(serieDir, setFile));
     const id = (st.match(/\n\tid\s*:\s*["']([^"']+)["']/) || [])[1];
@@ -86,7 +88,8 @@ for (const serieFile of fs.readdirSync(DATA).filter(f => f.endsWith('.ts'))) {
       const rarity = (txt.match(/\n\trarity\s*:\s*["']([^"']+)["']/) || [])[1] || '';
       const local = cf.slice(0, -3);
       const num = official && /^\d+$/.test(local) ? `${local.padStart(String(official).length, '0')}/${official}` : local;
-      ids.forEach((cm, i) => cards.push([cm, 'c', cn.fr || cn.en || '?', cn.en && cn.en !== cn.fr ? cn.en : '', id, num + (ids.length > 1 && i ? ` (v${i + 1})` : ''), rarity, 'CARD', 'EU']));
+      const img = serieId ? `${serieId}/${id}/${local}` : '';         // image de la carte sur assets.tcgdex.net
+      ids.forEach((cm, i) => cards.push([cm, 'c', cn.fr || cn.en || '?', cn.en && cn.en !== cn.fr ? cn.en : '', id, num + (ids.length > 1 && i ? ` (v${i + 1})` : ''), rarity, 'CARD', 'EU', img]));
     }
   }
 }
@@ -132,16 +135,75 @@ for (const url of PRODUCT_URLS) {
     if (id == null || !name || /single/i.test(cat) || !price.has(id)) continue;
     const type = typeOf(cat, name); if (!type) continue;
     const m = setByEn.find(([en]) => name === en || name.startsWith(en + ' ') || name.startsWith(en + ':'));
-    sealed.push([id, 's', m ? frName(name, m[0], SETS[m[1]][0]) : name, name, m ? m[1] : '', '', '', type, langOf(name)]);
+    sealed.push([id, 's', m ? frName(name, m[0], SETS[m[1]][0]) : name, name, m ? m[1] : '', '', '', type, langOf(name), '']);
   }
 }
 console.log(`Scellé : ${sealed.length} produits avec un prix.`);
 if (!PRODUCT_URLS.length) console.log('Astuce : ajoute la variable CM_PRODUCTS_URLS pour inclure le scellé.');
 
+/* ---------- 3b. Photos du scellé : catalogue TCGplayer via TCGCSV (rafraîchi chaque semaine) ---------- */
+const IMG_CACHE = `${DIR}/tcg-sealed.json`;
+const readJSON = (f, def) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return def; } };
+let tcg = readJSON(IMG_CACHE, null);
+if (!tcg || !Array.isArray(tcg.rows) || Date.now() - (tcg.at || 0) > 6.5 * 864e5) {
+  try {
+    const groups = (await getJSON('https://tcgcsv.com/tcgplayer/3/groups')).results || [];
+    const rows = []; let gi = 0;
+    const worker = async () => {
+      while (gi < groups.length) {
+        const g = groups[gi++];
+        try {
+          const j = await getJSON(`https://tcgcsv.com/tcgplayer/3/${g.groupId}/products`);
+          for (const p of j.results || []) {
+            if ((p.extendedData || []).some(e => e.name === 'Number')) continue;      // une carte, pas un produit scellé
+            if (/code card/i.test(p.name)) continue;
+            rows.push([p.productId, p.name, g.name]);
+          }
+        } catch (e) { /* groupe ignoré */ }
+      }
+    };
+    await Promise.all(Array.from({ length: 6 }, worker));
+    if (rows.length) { tcg = { at: Date.now(), rows }; write(IMG_CACHE, tcg); }
+    console.log(`Photos : catalogue TCGplayer rafraîchi (${rows.length} produits scellés).`);
+  } catch (e) { console.log('Photos : catalogue TCGplayer indisponible pour l’instant (' + e.message + ').'); }
+}
+if (tcg && tcg.rows) {
+  const nrm = x => String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\bpokemon\b|\(exclusive\)|\bexclusive\b/g, ' ')
+    .replace(/booster pack/g, 'booster').replace(/single pack blister|1-pack blister|1 pack blister/g, '1 pack blister')
+    .replace(/3-pack|three pack/g, '3 pack').replace(/&/g, ' and ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const grp = x => nrm(String(x).replace(/^[A-Za-z]{1,4}\d*\s*[:\-–]\s*/, ''));
+  // « reste » du nom une fois retiré le nom de l'extension : « Scarlet & Violet 151 Elite Trainer Box » → « elite trainer box »
+  const rest = (n, set) => { if (set && n.startsWith(set + ' ')) return n.slice(set.length + 1); const st = new Set(set.split(' ')); return n.split(' ').filter(w => !st.has(w)).join(' '); };
+  const all = tcg.rows.map(([id, name, g]) => { const n = nrm(name), gg = grp(g), r = rest(n, gg); return { id, n, g: gg, r, t: new Set(r.split(' ')) }; });
+  const exact = new Map(); for (const x of all) (exact.get(x.n) || exact.set(x.n, []).get(x.n)).push(x.id);
+  const jac = (a, b) => { let i = 0; for (const w of a) if (b.has(w)) i++; return i / (a.size + b.size - i); };
+  let found = 0;
+  for (const row of sealed) {
+    const n = nrm(row[3]);
+    let id = null;
+    const ex = exact.get(n);
+    if (ex && ex.length === 1) id = ex[0];
+    else {
+      const setEn = row[4] && SETS[row[4]] ? nrm(SETS[row[4]][1]) : '';
+      const pool = setEn ? all.filter(x => x.g === setEn || x.g.endsWith(' ' + setEn)) : [];
+      const r = rest(n, setEn), t = new Set(r.split(' '));
+      const same = pool.filter(x => x.r === r);
+      const sc = same.length === 1 ? [[same[0], 1]] : pool.map(x => [x, jac(t, x.t)]).sort((a, b) => b[1] - a[1]);
+      if (sc.length && sc[0][1] >= .8 && (!sc[1] || sc[0][1] - sc[1][1] >= .1)) id = sc[0][0].id;
+    }
+    row[9] = ''; row[10] = id || '';
+    if (id) found++;
+  }
+  console.log(`Photos : ${found} produits scellés sur ${sealed.length} ont une photo.`);
+}
+for (const row of sealed) { if (row.length < 11) { row[9] = row[9] || ''; row[10] = ''; } }
+for (const row of cards) row[10] = '';
+
 /* ---------- 4. Fichiers pour l'appli ---------- */
 const products = [...sealed, ...cards];
 const used = new Set(products.map(p => p[0]));
-write(`${DIR}/products.json`, { createdAt: created, fields: ['cm', 'k', 'name', 'en', 'set', 'num', 'rarity', 'type', 'lang'], sets: SETS, rows: products });
+write(`${DIR}/products.json`, { createdAt: created, fields: ['cm', 'k', 'name', 'en', 'set', 'num', 'rarity', 'type', 'lang', 'img', 'pimg'], sets: SETS, rows: products });
 const F = ['idProduct', 'trend', 'avg1', 'avg7', 'avg30', 'low', 'trend-holo', 'avg7-holo', 'avg30-holo'];
 write(`${DIR}/latest.json`, { createdAt: created, fields: F, rows: [...price].filter(([id]) => used.has(id)).map(([id, r]) => [id, ...r]) });
 // Relevé du jour, compact : [identifiant, tendance, moyenne 7 j, moyenne 30 j, prix bas]
