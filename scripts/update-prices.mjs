@@ -404,8 +404,12 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
   const refDate = ymd(Date.now() - 864e5);
   const todo = want.filter(d => !meta.done.includes(d));
   if (refDue) todo.unshift(refDate);
-  let have7z = true;
-  try { execSync('7z i', { stdio: 'ignore' }); } catch { try { execSync('sudo apt-get install -y -qq p7zip-full', { stdio: 'ignore' }); } catch { have7z = false; } }
+  // Outil de décompression 7-Zip : déjà présent sur la plupart des machines GitHub, sinon installé.
+  const find7z = () => { for (const b of ['7z', '7zz', '7za']) { try { execSync(`${b} i`, { stdio: 'ignore' }); return b; } catch { /* suivant */ } } return null; };
+  let z = find7z();
+  if (!z) { try { execSync('sudo apt-get update -qq && (sudo apt-get install -y -qq 7zip || sudo apt-get install -y -qq p7zip-full)', { stdio: 'ignore' }); } catch { /* échec d'installation */ } z = find7z(); }
+  const have7z = !!z;
+  if (!have7z) console.log('Historique long : outil 7-Zip introuvable, historique reporté au prochain passage.');
   let processed = 0, changed = false;
   if (have7z && targets.size && todo.length) {
     for (const d of todo) {
@@ -416,7 +420,7 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
         if (!res.ok) { if (res.status === 404 && d !== refDate) meta.done.push(d); continue; }   // jour absent de l'archive : on passe
         fs.writeFileSync(arc, Buffer.from(await res.arrayBuffer()));
         fs.rmSync(out, { recursive: true, force: true });
-        execSync(`7z x -y -bd -o${out} ${arc}`, { stdio: 'ignore' });
+        execSync(`${z} x -y -bd -o${out} ${arc}`, { stdio: 'ignore' });
         const base = fs.readdirSync(out).map(x => path.join(out, x, '3')).find(p => fs.existsSync(p));
         const day = {};
         if (base) for (const g of fs.readdirSync(base)) {
