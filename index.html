@@ -842,12 +842,19 @@ function cmPrice(row, field, holo) {
 const cmIdOf = ref => (PROD[ref] && PROD[ref].cm) || (state.cm.links[ref] && state.cm.links[ref].id) || null;
 const linkOf = ref => state.cm.links[ref] || (PROD[ref] && PROD[ref].cm ? { id: PROD[ref].cm, name: prodName(PROD[ref]), holo: false } : null);
 const trackedRefs = () => [...new Set([...state.items.filter(it => !it.sold).map(it => it.ref), ...state.wishlist.map(w => w.ref)])].filter(r => PROD[r]);
+// Garde tout l'historique : tous les relevés de la dernière année, puis un par semaine au-delà.
+function thin(arr) {
+  if (arr.length <= 500) return arr;
+  const lim = ds(T - 400); let lastKept = null;
+  const out = arr.filter(x => { if (x[0] >= lim) return true; if (lastKept && di(x[0]) - di(lastKept) < 7) return false; lastKept = x[0]; return true; });
+  arr.length = 0; arr.push(...out); return arr;
+}
 function putPoint(ref, date, v, src = 'cm') {
   const arr = (state.imported[ref] ||= []);
   const i = arr.findIndex(x => x[0] === date), pt = [date, Math.round(v * 100) / 100, src, 0];
   if (i >= 0) arr[i] = pt; else arr.push(pt);
   arr.sort((a, b) => a[0].localeCompare(b[0]));
-  if (arr.length > 400) arr.splice(0, arr.length - 400);
+  thin(arr);
 }
 // Applique une ligne de prix Cardmarket à un produit : point du jour, et amorce de courbe tant que l'historique est court.
 function cmApply(ref, row, date) {
@@ -864,7 +871,7 @@ function cmApply(ref, row, date) {
   }
   put([date, Math.round(v * 100) / 100, 'cm', 0]);
   arr.sort((a, b) => a[0].localeCompare(b[0]));
-  if (arr.length > 400) arr.splice(0, arr.length - 400);
+  thin(arr);
   state.cm.last[ref] = { d: date, trend: row.trend, avg1: row.avg1, avg7: row.avg7, avg30: row.avg30, low: row.low };
   return true;
 }
@@ -972,13 +979,25 @@ async function mirrorSeries(id) {
   return rows.map(r => [r[fi.date], cmPrice({ trend: r[fi.trend], avg1: r[fi.avg1], avg7: r[fi.avg7], avg30: r[fi.avg30], low: r[fi.low] }, state.cm.field, false)])
     .filter(([d, v]) => d && v > 0 && di(d) <= T);
 }
+// Historique long du scellé (depuis février 2024), commun à tous les visiteurs : data/longhist/tcg-<n>.json
+const LONG = new Map(); let longMeta = null;
+const longShard = n => { if (!LONG.has(n)) LONG.set(n, fetch(AUTO.base + `longhist/tcg-${n}.json?v=${longMeta ? longMeta.n : 0}`, { cache: 'no-cache' }).then(r => r.ok ? r.json() : {}).catch(() => ({}))); return LONG.get(n); };
+async function longSeries(cm) {
+  if (!AUTO.on || !cm) return [];
+  if (!longMeta) longMeta = await fetch(AUTO.base + 'longhist/meta.json?v=' + Math.floor(Date.now() / 36e5), { cache: 'no-cache' }).then(r => r.ok ? r.json() : { n: 0 }).catch(() => ({ n: 0 }));
+  if (!longMeta.n) return [];
+  const j = await longShard(cm % 32);
+  return (j && j[String(cm)]) || [];
+}
 // Aperçu de la courbe d'un produit du catalogue, même s'il n'est pas dans la collection.
 async function previewProduct(ref) {
   const p = P(ref); if (!p || !p.cm || IMP[ref] || PREV[ref]) return false;
   PREV[ref] = [];
-  const s = await mirrorSeries(p.cm);
-  if (!s.length) return false;
-  PREV[ref] = s.map(([d, v]) => [di(d), v]).sort((a, b) => a[0] - b[0]);
+  const [s, l] = await Promise.all([mirrorSeries(p.cm), p.kind === 'sealed' ? longSeries(p.cm) : []]);
+  const first = s.length ? s.map(x => x[0]).sort()[0] : '9999';
+  const pts = [...l.filter(([d]) => d < first), ...s];
+  if (!pts.length) return false;
+  PREV[ref] = pts.map(([d, v]) => [di(d), v]).filter(([d]) => !isNaN(d)).sort((a, b) => a[0] - b[0]);
   return true;
 }
 async function autoLoad(silent) {
@@ -1011,6 +1030,20 @@ async function autoLoad(silent) {
       }
     }
     fresh.forEach(ref => state.cm.done[ref] = 1);
+    // Historique long du scellé depuis 2024 (repris à chaque nouvelle version des fichiers du robot).
+    state.cm.long ||= {};
+    for (const ref of tracked) {
+      const p = P(ref); if (!p || p.kind !== 'sealed') continue;
+      const l = await longSeries(cmIdOf(ref));
+      if (!longMeta || !longMeta.n || state.cm.long[ref] === longMeta.n) continue;
+      const arr = (state.imported[ref] ||= []);
+      const firstCm = arr.filter(x => x[2] === 'cm' && x[3] !== -1).map(x => x[0]).sort()[0] || '9999';
+      state.imported[ref] = arr.filter(x => x[2] !== 'us');
+      for (const [d, v] of l) if (d < firstCm) state.imported[ref].push([d, v, 'us', 0]);
+      state.imported[ref].sort((a, b) => a[0].localeCompare(b[0]));
+      thin(state.imported[ref]);
+      state.cm.long[ref] = longMeta.n;
+    }
     // Complète le passé avec l'archive publique (une seule fois par produit, sans écraser les relevés du robot).
     state.cm.mirror ||= {};
     for (const ref of tracked.filter(r => !state.cm.mirror[r])) {
@@ -1438,7 +1471,9 @@ VIEWS.total = function () {
   let est = -1; for (const it of state.items) if (!it.sold && IMP[it.ref] && di(it.buyDate) < IMP[it.ref][0][0]) est = Math.max(est, IMP[it.ref][0][0]);
   const from = periodFrom(ui.period);
   const estOn = est > from;
-  const histNote = estOn ? `Pointillés : estimation entre tes prix d’achat et les premiers prix Cardmarket connus (historique réel depuis le ${dfr(est)}).` : 'Survole la courbe pour voir la valeur à chaque date.';
+  const usOn = state.items.some(it => !it.sold && (IMP[it.ref] || []).some(x => x[2] === 'us' && x[0] < T));
+  const usNote = usOn ? ' Avant le 16 sept. 2026, la courbe suit l’évolution du marché TCGplayer (États-Unis), ramenée au prix Cardmarket.' : '';
+  const histNote = (estOn ? `Pointillés : estimation entre tes prix d’achat et les premiers prix connus (historique depuis le ${dfr(est)}).` : 'Survole la courbe pour voir la valeur à chaque date.') + usNote;
   const t = totalsFor(ui.filter, from), all = totals();
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
   const vs = t.vs;
@@ -1714,6 +1749,7 @@ function openProduct(id) {
     <h3 style="margin:20px 0 6px">Photo du produit</h3>
     <p class="muted small" style="margin-bottom:10px">Elle s’affiche dans le catalogue et pour tous tes exemplaires de ce produit. ${p.kind === 'sealed' ? `Pas de photo sous la main ? <a href="https://www.google.com/search?tbm=isch&q=${encodeURIComponent((p.en || prodName(p)) + ' pokemon')}" target="_blank" rel="noopener">Chercher une image sur Google</a>, enregistre-la, puis ajoute-la ici.` : 'L’image officielle de la carte est utilisée tant que tu n’en ajoutes pas.'}</p>
     <div class="photos" id="ph-grid"><span class="muted small">Chargement…</span></div>
+    ${(IMP[id] || PREV[id] ? (IMP[id] ? IMP[id].some(x => x[2] === 'us') : p.kind === 'sealed' && PREV[id].some(x => x[0] < di('2026-09-16'))) : false) ? '<p class="muted small" style="margin-top:6px">Avant le 16 sept. 2026 : évolution du marché TCGplayer (États-Unis), ramenée au prix Cardmarket.</p>' : ''}
     ${grades.length ? `<h3 style="margin:16px 0 8px">Selon l’état et la gradation</h3><dl class="kv">${grades.map(([l, m]) => `<dt>${l}</dt><dd><b>${esc(eur(cur * m))}</b></dd>`).join('')}</dl><p class="muted small" style="margin-top:6px">Estimations par coefficient à partir du prix Near Mint. Importe des relevés gradés pour plus de précision.</p>` : ''}
     ${mine.length ? `<p style="margin-top:14px">Tu en possèdes <b>${mine.reduce((a, it) => a + it.qty, 0)}</b>.</p>` : ''}
     <div class="modal-foot">${p.custom && !used ? `<button class="btn ghost danger" data-act="delcustom" data-ref="${id}">Retirer du catalogue</button>` : ''}<button class="btn" data-act="wish" data-ref="${id}" aria-pressed="${wished}">${ICON.heart}${wished ? 'Dans ta wishlist' : 'Wishlist'}</button><button class="btn" data-act="alert" data-ref="${id}">${ICON.bell}Alerte</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button><button class="btn primary" data-act="additem" data-ref="${id}" autofocus>${ICON.plus}Ajouter à ma collection</button></div>`);
@@ -2177,7 +2213,7 @@ const ACT = {
     const put = pt => { const i = arr.findIndex(x => x[0] === pt[0]); if (i >= 0) arr[i] = pt; else arr.push(pt); };
     if (d.hist) a.hist.forEach(h => { if (h.d < T) put([ds(h.d), h.p, 'ebay', h.n]); });
     put([today, Math.round(a.median * 100) / 100, 'ebay', a.n]);
-    arr.sort((x, y) => x[0].localeCompare(y[0])); if (arr.length > 400) arr.splice(0, arr.length - 400);
+    arr.sort((x, y) => x[0].localeCompare(y[0])); thin(arr);
     state.ebayQ[ref] = { q: $('#eb-q').value.trim(), ex: $('#eb-ex').value };
     EB = null; closeModal(); commit(d.hist ? 'Courbe et cote eBay enregistrées' : 'Cote eBay enregistrée'); openProduct(ref);
   },
