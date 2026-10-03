@@ -51,15 +51,16 @@ if (!price.size) { console.error('Guide des prix vide ou format non reconnu.'); 
 console.log(`Guide des prix du ${created} : ${price.size} produits.`);
 
 /* ---------- 2. Extensions et cartes (TCGdex) ---------- */
-if (!fs.existsSync(path.join(TCGDEX_DIR, 'data'))) {
+if (!fs.existsSync(path.join(TCGDEX_DIR, 'data')) || !fs.existsSync(path.join(TCGDEX_DIR, 'data-asia'))) {
+  if (fs.existsSync(TCGDEX_DIR)) fs.rmSync(TCGDEX_DIR, { recursive: true, force: true });
   console.log('Téléchargement de la base de cartes TCGdex…');
   execSync(`git clone -q --depth 1 --filter=blob:none --sparse https://github.com/tcgdex/cards-database ${TCGDEX_DIR}`, { stdio: 'inherit' });
-  execSync(`git -C ${TCGDEX_DIR} sparse-checkout set data`, { stdio: 'inherit' });
+  execSync(`git -C ${TCGDEX_DIR} sparse-checkout set data data-asia`, { stdio: 'inherit' });
 }
 const read = f => fs.readFileSync(f, 'utf8');
 const langs = block => { const o = {}; for (const m of (block || '').matchAll(/\b(fr|en)\s*:\s*(["'`])((?:\\.|(?!\2).)*)\2/g)) o[m[1]] = m[3].replace(/\\(["'`])/g, '$1'); return o; };
 const topName = txt => { const m = txt.match(/\n\tname\s*:\s*\{([^}]*)\}/); return m ? langs(m[1]) : {}; };
-const SETS = {}, setByEn = [];
+const SETS = {}, setByEn = [], DEXFR = {};
 const cards = [];
 const DATA = path.join(TCGDEX_DIR, 'data');
 for (const serieFile of fs.readdirSync(DATA).filter(f => f.endsWith('.ts'))) {
@@ -76,7 +77,7 @@ for (const serieFile of fs.readdirSync(DATA).filter(f => f.endsWith('.ts'))) {
     const nm = topName(st);
     const date = (st.match(/releaseDate\s*:\s*["']([^"']+)["']/) || [])[1] || '';
     const official = (st.match(/official\s*:\s*(\d+)/) || [])[1] || '';
-    SETS[id] = [nm.fr || nm.en || id, nm.en || nm.fr || id, serie.fr || serie.en || serieName, date];
+    SETS[id] = [nm.fr || nm.en || id, nm.en || nm.fr || id, serie.fr || serie.en || serieName, date, serieId];
     if (nm.en) setByEn.push([nm.en, id]);
     const setDir = path.join(serieDir, setFile.slice(0, -3));
     if (!fs.existsSync(setDir)) continue;
@@ -85,6 +86,8 @@ for (const serieFile of fs.readdirSync(DATA).filter(f => f.endsWith('.ts'))) {
       const ids = [...new Set([...txt.matchAll(/cardmarket\s*:\s*(\d+)/g)].map(m => +m[1]))].filter(i => price.has(i));
       if (!ids.length) continue;
       const cn = topName(txt);
+      const dex = (txt.match(/dexId\s*:\s*\[\s*(\d+)\s*\]/) || [])[1];
+      if (dex && cn.fr && !/\n\tsuffix\s*:/.test(txt) && !/\b(ex|EX|GX|V|VMAX|VSTAR|BREAK)\b/.test(cn.fr)) { const m = (DEXFR[dex] ||= {}); m[cn.fr] = (m[cn.fr] || 0) + 1; }
       const rarity = (txt.match(/\n\trarity\s*:\s*["']([^"']+)["']/) || [])[1] || '';
       const local = cf.slice(0, -3);
       const num = official && /^\d+$/.test(local) ? `${local.padStart(String(official).length, '0')}/${official}` : local;
@@ -95,6 +98,49 @@ for (const serieFile of fs.readdirSync(DATA).filter(f => f.endsWith('.ts'))) {
 }
 setByEn.sort((a, b) => b[0].length - a[0].length);
 console.log(`TCGdex : ${Object.keys(SETS).length} extensions, ${cards.length} cartes avec un prix Cardmarket.`);
+
+/* ---------- 2b. Cartes japonaises (TCGdex, dossier data-asia) ---------- */
+// Les noms n'existent qu'en japonais : on leur donne le nom français du Pokémon (via son numéro de Pokédex) + son suffixe (ex, V…).
+const dexName = {};
+for (const [d, m] of Object.entries(DEXFR)) dexName[d] = Object.entries(m).sort((a, b) => b[1] - a[1])[0][0];
+const ASIA = path.join(TCGDEX_DIR, 'data-asia');
+const block = (txt, key) => { const m = txt.match(new RegExp('\\n\\t' + key + '\\s*:\\s*\\{([^}]*)\\}')); const o = {}; if (m) for (const x of m[1].matchAll(/(?:'([\w-]+)'|(\w+))\s*:\s*(["'`])((?:\\.|(?!\3).)*)\3/g)) o[x[1] || x[2]] = x[4]; return o; };
+let jpCount = 0;
+if (fs.existsSync(ASIA)) {
+  for (const serieFile of fs.readdirSync(ASIA).filter(f => f.endsWith('.ts'))) {
+    const serieDir = path.join(ASIA, serieFile.slice(0, -3));
+    if (!fs.existsSync(serieDir)) continue;
+    const serieTxt = read(path.join(ASIA, serieFile));
+    const serieId = (serieTxt.match(/\n\tid\s*:\s*["']([^"']+)["']/) || [])[1] || serieFile.slice(0, -3);
+    const serieNm = block(serieTxt, 'name');
+    for (const setFile of fs.readdirSync(serieDir).filter(f => f.endsWith('.ts'))) {
+      const st = read(path.join(serieDir, setFile));
+      const sid = (st.match(/\n\tid\s*:\s*["']([^"']+)["']/) || [])[1];
+      const nm = block(st, 'name'), rd = block(st, 'releaseDate');
+      if (!sid || !nm.ja) continue;                                  // uniquement les éditions japonaises
+      const official = (st.match(/official\s*:\s*(\d+)/) || [])[1] || '';
+      const label = nm.ja;
+      const key = 'jp-' + sid;
+      SETS[key] = [`${label} (${sid})`, label, 'Japon — ' + (serieNm.id || serieNm.ja || serieId), rd.ja || (st.match(/releaseDate\s*:\s*["']([^"']+)["']/) || [])[1] || '', ''];
+      const setDir = path.join(serieDir, setFile.slice(0, -3));
+      if (!fs.existsSync(setDir)) continue;
+      for (const cf of fs.readdirSync(setDir).filter(f => f.endsWith('.ts'))) {
+        const txt = read(path.join(setDir, cf));
+        const ids = [...new Set([...txt.matchAll(/cardmarket\s*:\s*(\d+)/g)].map(m => +m[1]))].filter(i => price.has(i));
+        if (!ids.length) continue;
+        const cn = block(txt, 'name');
+        const dex = (txt.match(/dexId\s*:\s*\[\s*(\d+)\s*\]/) || [])[1];
+        const suf = ((cn.ja || '').match(/(ex|EX|GX|V|VMAX|VSTAR|V-UNION|BREAK|LV\.X|δ)$/) || [])[1] || '';
+        const name = dex && dexName[dex] ? `${dexName[dex]}${suf ? ' ' + (suf === 'EX' && /^S|^SV|^M/.test(serieId) ? 'ex' : suf) : ''}` : (cn.ja || cn.id || '?');
+        const rarity = (txt.match(/\n\trarity\s*:\s*["']([^"']+)["']/) || [])[1] || '';
+        const local = cf.slice(0, -3);
+        const num = official && +official > 0 && /^\d+$/.test(local) ? `${local.padStart(String(official).length, '0')}/${official}` : local;
+        ids.forEach((cm, i) => { cards.push([cm, 'c', name, cn.ja || '', key, num + (ids.length > 1 && i ? ` (v${i + 1})` : ''), rarity, 'CARD', 'JP', `ja:${serieId}/${sid}/${local}`]); jpCount++; });
+      }
+    }
+  }
+}
+console.log(`Cartes japonaises : ${jpCount} avec un prix Cardmarket.`);
 
 /* ---------- 3. Produits scellés (catalogue Cardmarket) ---------- */
 const sealed = [];
@@ -118,13 +164,37 @@ const FR_TYPES = [
   [/^ultra.?premium collection$/i, 'Ultra Premium Collection'], [/^6 booster box case$/i, 'Carton de 6 displays'], [/^10 elite trainer box case$/i, 'Carton de 10 coffrets Dresseur d’Élite'],
   [/^24 sleeved booster case$/i, 'Présentoir de 24 boosters sous blister'],
 ];
+// Traduction des types de produits dans les noms restants : le type passe en tête, à la française.
+// « Flamigo Mini Tin » → « Mini Pokébox Flamigo », « Regirock 3-Pack Blister » → « Tripack Regirock ».
+const FR_PHRASES = [
+  [/pok[ée]mon center elite trainer box/i, 'Coffret Dresseur d’Élite Pokémon Center'], [/elite trainer box/i, 'Coffret Dresseur d’Élite'],
+  [/booster box/i, 'Display'], [/booster bundle/i, 'Bundle 6 boosters'], [/sleeved booster/i, 'Booster sous blister'],
+  [/build (?:&|and) battle stadium/i, 'Coffret Stade Avant-Première'], [/build (?:&|and) battle box/i, 'Coffret Avant-Première'],
+  [/ultra.?premium collection/i, 'Coffret Ultra Premium'], [/premium checklane blister/i, 'Blister Premium'],
+  [/premium poster collection/i, 'Coffret Poster Premium'], [/premium figure collection/i, 'Coffret Figurine Premium'],
+  [/premium collection/i, 'Coffret Collection Premium'], [/special collection/i, 'Coffret Collection Spéciale'],
+  [/binder collection/i, 'Coffret Classeur'], [/poster collection/i, 'Coffret Poster'], [/pin collection/i, 'Coffret Pin’s'],
+  [/figure collection/i, 'Coffret Figurine'], [/collector(?:'|’)?s? chest/i, 'Coffre du Collectionneur'], [/gift box/i, 'Coffret cadeau'],
+  [/3.?pack blister/i, 'Tripack'], [/2.?pack blister/i, 'Duopack'], [/1.?pack blister|single pack blister/i, 'Blister'],
+  [/stacking tin/i, 'Pokébox empilable'], [/mini tin/i, 'Mini Pokébox'], [/\btin\b/i, 'Pokébox'],
+  [/league battle deck/i, 'Deck de Combat de Ligue'], [/battle deck/i, 'Deck de combat'], [/theme deck/i, 'Deck à thème'],
+  [/start(?:er)? deck/i, 'Deck de démarrage'], [/trainer(?:'|’)?s? toolkit/i, 'Kit du Dresseur'], [/trainer kit/i, 'Kit du Dresseur'],
+  [/collection box/i, 'Coffret Collection'], [/\bcollection$/i, 'Coffret'], [/\bbox$/i, 'Coffret'],
+];
+function frenchify(x) {
+  for (const [re, fr] of FR_PHRASES) {
+    const m = x.match(re);
+    if (m) { const rest = (x.slice(0, m.index) + ' ' + x.slice(m.index + m[0].length)).replace(/\s+/g, ' ').replace(/^[\s:–-]+|[\s:–-]+$/g, '').trim(); return rest ? `${fr} ${rest}` : fr; }
+  }
+  return x;
+}
 function frName(name, en, fr) {
   const rest = name.slice(en.length).replace(/^[\s:–-]+/, '').trim();
   if (!rest) return fr;
   const t = FR_TYPES.find(([re]) => re.test(rest));
-  return t ? `${t[1]} ${fr}` : `${fr} : ${rest}`;
+  return t ? `${t[1]} ${fr}` : `${fr} : ${frenchify(rest)}`;
 }
-const langOf = name => /\bJP\b|japanese|japan/i.test(name) ? 'JP' : /chinese|\bCS\d|\bCSV\d|\bCBB/i.test(name) ? 'CN' : /korean|\bKR\b/i.test(name) ? 'KR' : 'EU';
+const langOf = name => /\bJP\b|japanese|japan/i.test(name) ? 'JP' : /chinese|\bCS\d|\bCSV\d|\bCBB|taiwan|simplified|traditional/i.test(name) ? 'CN' : /korean|\bKR\b/i.test(name) ? 'KR' : /indonesian|\bthai\b|asia(n)?\b|\bSEA\b/i.test(name) ? 'AS' : 'EU';
 for (const url of PRODUCT_URLS) {
   const j = await getJSON(url);
   const isNon = /non.?single/i.test(url);
@@ -136,7 +206,7 @@ for (const url of PRODUCT_URLS) {
     const type = typeOf(cat, name); if (!type) continue;
     if (langOf(name) !== 'EU' || /\bUS version\b|\(US\)/i.test(name)) continue;   // uniquement les produits vendus en Europe (version française)
     const m = setByEn.find(([en]) => name === en || name.startsWith(en + ' ') || name.startsWith(en + ':'));
-    sealed.push([id, 's', m ? frName(name, m[0], SETS[m[1]][0]) : name, name, m ? m[1] : '', '', '', type, langOf(name), '']);
+    sealed.push([id, 's', m ? frName(name, m[0], SETS[m[1]][0]) : frenchify(name), name, m ? m[1] : '', '', '', type, langOf(name), '']);
   }
 }
 console.log(`Scellé : ${sealed.length} produits avec un prix.`);
@@ -179,6 +249,7 @@ if (tcg && tcg.rows) {
   const all = tcg.rows.map(([id, name, g]) => { const n = nrm(name), gg = grp(g), r = rest(n, gg); return { id, n, g: gg, r, t: new Set(r.split(' ')), full: new Set(n.split(' ')) }; });
   const exact = new Map(); for (const x of all) (exact.get(x.n) || exact.set(x.n, []).get(x.n)).push(x.id);
   const jac = (a, b) => { let i = 0; for (const w of a) if (b.has(w)) i++; return i / (a.size + b.size - i); };
+  const KINDS = [/elite trainer box/, /\btin\b/, /blister/, /deck/, /booster box/, /booster bundle/, /prerelease/, /collection/, /\bbox\b/, /booster/];
   let found = 0;
   for (const row of sealed) {
     const n = nrm(row[3]);
@@ -203,18 +274,62 @@ if (tcg && tcg.rows) {
       }
       if (best && b1 >= .75 && b1 - b2 >= .1) id = best.id;
     }
+    // Deuxième essai dans l'extension : la plupart des mots du nom Cardmarket se retrouvent chez TCGplayer,
+    // avec le même genre de produit (« Gengar Mini Tin » ↔ « 151 Mini Tin [Gengar & Poliwag] »).
+    if (!id && row[4] && SETS[row[4]]) {
+      const setEn = nrm(SETS[row[4]][1]), r = rest(n, setEn), t = new Set(r.split(' ').filter(Boolean));
+      const kind = KINDS.find(k => k.test(r));
+      const pool = all.filter(x => (x.g === setEn || x.g.endsWith(' ' + setEn)) && (!kind || kind.test(x.r)) && !/\bcase\b|display|set of/.test(x.r) === !/\bcase\b|display|set of/.test(r));
+      const sc = pool.map(x => { let i = 0; for (const w of t) if (x.t.has(w)) i++; return [x, t.size ? i / t.size : 0, x.t.size]; }).sort((a, b) => b[1] - a[1] || a[2] - b[2]);
+      if (sc.length && sc[0][1] >= .6 && (!sc[1] || sc[0][1] - sc[1][1] >= .1 || sc[0][2] < sc[1][2])) id = sc[0][0].id;
+    }
     row[9] = ''; row[10] = id || '';
     if (id) found++;
   }
-  console.log(`Photos : ${found} produits scellés sur ${sealed.length} ont une photo.`);
+  // Photo indicative pour le reste : même extension, même genre de produit (booster, display, coffret…).
+  const typeKey = { BOOSTER: /^booster$/, DISPLAY: /^booster box$/, HALF_DISPLAY: /^booster box$/, ETB: /^elite trainer box$/, BUNDLE: /^booster bundle$/, TIN: /\btin\b/, BLISTER: /blister/, TRIPACK: /3 pack blister/, DECK: /deck/, COFFRET: /collection|box/, UPC: /premium collection|collection/ };
+  let indic = 0, logos = 0;
+  for (const row of sealed) {
+    if (row[10] || !row[4] || !SETS[row[4]]) continue;
+    const setEn = nrm(SETS[row[4]][1]);
+    const pool = all.filter(x => x.g === setEn || x.g.endsWith(' ' + setEn));
+    const want = typeKey[row[7]];
+    const pick = (want && pool.find(x => want.test(x.r) && !/\bcase\b|display|set of/.test(x.r))) || pool.find(x => /^booster box$/.test(x.r)) || pool.find(x => /^booster$/.test(x.r));
+    if (pick) { row[10] = '~' + pick.id; indic++; }
+    else if (SETS[row[4]][4]) { row[10] = `logo:${SETS[row[4]][4]}/${row[4]}`; logos++; }
+  }
+  console.log(`Photos : ${found} produits scellés sur ${sealed.length} ont leur photo exacte, ${indic} une photo indicative, ${logos} le logo de l'extension.`);
 }
 for (const row of sealed) { if (row.length < 11) { row[9] = row[9] || ''; row[10] = ''; } }
+// On ne garde que les produits de la gamme française / européenne : rattachés à une extension
+// internationale, ou présents dans le catalogue TCGplayer. Les éditions propres à l'Asie sont écartées.
+if (tcg && tcg.rows) {
+  const before = sealed.length;
+  for (let i = sealed.length - 1; i >= 0; i--) if (!sealed[i][4] && !sealed[i][10]) sealed.splice(i, 1);
+  console.log(`Scellé : ${before - sealed.length} produits hors gamme française retirés, ${sealed.length} gardés.`);
+}
 for (const row of cards) row[10] = '';
+
+/* ---------- 3c. Doublons : un seul produit visible par nom ---------- */
+// Les doublons restent dans le fichier (pour les objets déjà dans une collection) mais sont masqués du catalogue.
+{
+  const seen = new Map(); let hidden = 0;
+  const score = r => (typeof r[10] === 'number' || /^\d+$/.test(String(r[10])) ? 4 : r[10] ? 2 : 0) + (price.get(r[0])?.[0] ? 1 : 0);
+  for (const r of sealed) {
+    const k = r[2].toLowerCase().replace(/\s+/g, ' ').trim() + '|' + r[7];
+    const prev = seen.get(k);
+    if (!prev) { seen.set(k, r); continue; }
+    if (score(r) > score(prev)) { prev[11] = 1; seen.set(k, r); } else r[11] = 1;
+    hidden++;
+  }
+  for (const r of cards) if (/ \(v\d+\)$/.test(r[5])) { r[11] = 1; hidden++; }
+  console.log(`Doublons masqués : ${hidden}.`);
+}
 
 /* ---------- 4. Fichiers pour l'appli ---------- */
 const products = [...sealed, ...cards];
 const used = new Set(products.map(p => p[0]));
-write(`${DIR}/products.json`, { createdAt: created, fields: ['cm', 'k', 'name', 'en', 'set', 'num', 'rarity', 'type', 'lang', 'img', 'pimg'], sets: SETS, rows: products });
+write(`${DIR}/products.json`, { createdAt: created, fields: ['cm', 'k', 'name', 'en', 'set', 'num', 'rarity', 'type', 'lang', 'img', 'pimg', 'hid'], sets: SETS, rows: products });
 const F = ['idProduct', 'trend', 'avg1', 'avg7', 'avg30', 'low', 'trend-holo', 'avg7-holo', 'avg30-holo'];
 write(`${DIR}/latest.json`, { createdAt: created, fields: F, rows: [...price].filter(([id]) => used.has(id)).map(([id, r]) => [id, ...r]) });
 // Relevé du jour, compact : [identifiant, tendance, moyenne 7 j, moyenne 30 j, prix bas]
