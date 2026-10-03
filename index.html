@@ -941,13 +941,13 @@ function parseCmPage(text) {
 const AUTO = { on: !!window.POKEVAULT_DATA, base: window.POKEVAULT_DATA || '', guideDate: null, error: null, busy: false, count: 0 };
 function registerProducts(j) {
   const fi = Object.fromEntries(j.fields.map((f, i) => [f, i]));
-  for (const [id, [fr, en, serie, date]] of Object.entries(j.sets || {})) {
+  for (const [id, [fr, en, serie, date, sid]] of Object.entries(j.sets || {})) {
     const h = hash(id) % 360;
-    SETS['t:' + id] = { fr, en, serie, date, code: id, c: [`hsl(${h} 62% 46%)`, `hsl(${(h + 110) % 360} 52% 32%)`] };
+    SETS['t:' + id] = { fr, en, serie, date, sid: sid || '', code: id.replace(/^jp-/, ''), c: [`hsl(${h} 62% 46%)`, `hsl(${(h + 110) % 360} 52% 32%)`] };
   }
   EXTRA = j.rows.map(r => {
     const set = r[fi.set] ? 't:' + r[fi.set] : '';
-    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '', pimg: fi.pimg != null && r[fi.pimg] ? String(r[fi.pimg]) : '', hid: fi.hid != null && r[fi.hid] ? 1 : 0 };
+    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '', pimg: fi.pimg != null && r[fi.pimg] ? String(r[fi.pimg]) : '', hid: fi.hid != null && r[fi.hid] ? 1 : 0, tid: fi.tid != null && r[fi.tid] ? r[fi.tid] : '' };
   });
   CMF.catalog = EXTRA.map(p => ({ id: p.cm, name: prodName(p) + (p.en ? ' · ' + p.en : ''), cat: TYPES[p.type] || '', exp: setName(p), t: toks(`${p.name} ${p.en} ${SETS[p.set]?.en || ''} ${setName(p)} ${p.number}`) }));
   CMF.catalogCount = EXTRA.length;
@@ -1119,6 +1119,7 @@ function refreshListArt() { if (['mine', 'total', 'catalog'].includes(ui.view)) 
 document.addEventListener('error', e => {
   const t = e.target;
   if (!(t instanceof HTMLImageElement) || !t.dataset.ref) return;
+  if (t.dataset.alts) { const a = t.dataset.alts.split('|'); const next = a.shift(); if (a.length) t.dataset.alts = a.join('|'); else delete t.dataset.alts; t.src = next; return; }
   if (t.dataset.alt) { const a = t.dataset.alt; delete t.dataset.alt; t.src = a; return; }
   t.outerHTML = thumbSvg(P(t.dataset.ref), +t.dataset.size || 56);
 }, true);
@@ -1157,14 +1158,21 @@ function colorsFor(p) {
 function thumb(p, size = 56, itemId) {
   const cover = typeof PH !== 'undefined' && p && ((itemId && PH.covers[itemId]) || PH.covers['p:' + p.id]);
   if (cover) return `<img class="pic" src="${cover}" width="${size}" height="${size}" style="width:${size}px;height:${size}px" alt="">`;
+  // Chaîne d'images : si une adresse ne répond pas, la suivante est essayée, puis la vignette dessinée.
+  const tcgp = id => `https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(String(id).replace(/^~/, ''))}_200w.jpg`;
+  const setLogo = () => { const s = p && SETS[p.set]; const raw = p && p.set ? String(p.set).replace(/^t:/, '') : ''; return s && s.sid && raw && !raw.startsWith('jp-') ? [`https://assets.tcgdex.net/fr/${s.sid}/${raw}/logo.webp`, `https://assets.tcgdex.net/en/${s.sid}/${raw}/logo.webp`] : []; };
+  const img = (urls, cls, style) => { const [first, ...rest] = urls.filter(Boolean); return first ? `<img class="pic ${cls}" src="${first}" ${rest.length ? `data-alts="${esc(rest.join('|'))}"` : ''} data-ref="${esc(p.id)}" data-size="${size}" style="${style}" loading="lazy" alt="${esc(prodName(p))}">` : null; };
   if (p && p.pimg) {
     // photo exacte (n° TCGplayer), photo indicative (~n°) ou logo de l'extension (logo:série/extension)
     const pi = String(p.pimg);
-    if (pi.startsWith('logo:')) { const u = `https://assets.tcgdex.net/fr/${pi.slice(5)}/logo.webp`; return `<img class="pic box logo" src="${u}" data-alt="${u.replace('/fr/', '/en/')}" data-ref="${esc(p.id)}" data-size="${size}" style="width:${size}px;height:${size}px" loading="lazy" alt="${esc(prodName(p))}">`; }
-    return `<img class="pic box" src="https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(pi.replace(/^~/, ''))}_200w.jpg" data-ref="${esc(p.id)}" data-size="${size}" style="width:${size}px;height:${size}px" loading="lazy" alt="${esc(prodName(p))}">`;
+    const urls = pi.startsWith('logo:') ? [`https://assets.tcgdex.net/fr/${pi.slice(5)}/logo.webp`, `https://assets.tcgdex.net/en/${pi.slice(5)}/logo.webp`] : [tcgp(pi), ...setLogo()];
+    const h = img(urls, 'box' + (pi.startsWith('logo:') ? ' logo' : ''), `width:${size}px;height:${size}px`); if (h) return h;
   }
   const u = typeof tcgImg === 'function' ? tcgImg(p) : null;
-  if (u) return `<img class="pic card" src="${u}" ${u.includes('/fr/') ? `data-alt="${u.replace('/fr/', '/en/')}"` : ''} data-ref="${esc(p.id)}" data-size="${size}" style="height:${size}px;width:${Math.round(size * .727)}px" loading="lazy" alt="${esc(prodName(p))}">`;
+  if (u || (p && p.tid)) {
+    const h = img([u, u && u.includes('/fr/') ? u.replace('/fr/', '/en/') : null, p.tid ? tcgp(p.tid) : null], 'card', `height:${size}px;width:${Math.round(size * .727)}px`); if (h) return h;
+  }
+  if (p && p.kind === 'sealed' && p.set) { const h = img(setLogo(), 'box logo', `width:${size}px;height:${size}px`); if (h) return h; }
   return thumbSvg(p, size);
 }
 function thumbSvg(p, size = 56) {
