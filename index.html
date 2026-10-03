@@ -198,6 +198,7 @@ label.f{display:flex;flex-direction:column;gap:6px;font-size:.87rem;color:var(--
 /* Images et photos */
 img.pic{display:block;object-fit:cover;border-radius:10px;background:var(--surface-2)}
 img.pic.box{object-fit:contain;background:#fff;padding:4px;border-radius:10px}
+img.pic.box.logo{background:var(--surface-2);padding:10px}
 img.pic.card{object-fit:contain;background:none;border-radius:5px;filter:drop-shadow(0 4px 8px rgba(0,0,0,.3))}
 .photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:10px}
 .ph{position:relative;aspect-ratio:1;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface);padding:0;cursor:pointer}
@@ -365,7 +366,7 @@ const SETS = {
   sv8a:  { fr: 'Terastal Festival ex', en: 'Terastal Festival ex', code: 'SV8a', serie: 'Écarlate et Violet (JP)', date: '2024-12-06', c: ['#D53F8C', '#3182CE'] },
   sv2a:  { fr: 'Pokémon Card 151', en: 'Pokémon Card 151', code: 'SV2a', serie: 'Écarlate et Violet (JP)', date: '2023-06-16', c: ['#D9542B', '#1F7A8C'] },
 };
-const TYPES = { DISPLAY: 'Display', HALF_DISPLAY: 'Demi-display', ETB: 'ETB', UPC: 'UPC', BUNDLE: 'Bundle', TRIPACK: 'Tripack', COFFRET: 'Coffret', BOOSTER: 'Booster', BLISTER: 'Blister', TIN: 'Tin', DECK: 'Deck', AUTRE: 'Autre', CARD: 'Carte' };
+const TYPES = { DISPLAY: 'Display', HALF_DISPLAY: 'Demi-display', ETB: 'ETB', UPC: 'UPC', BUNDLE: 'Bundle', TRIPACK: 'Tripack', COFFRET: 'Coffret', BOOSTER: 'Booster', BLISTER: 'Blister', TIN: 'Pokébox', DECK: 'Deck', AUTRE: 'Autre', CARD: 'Carte' };
 const LANGS = { FR: 'Français', EN: 'Anglais', JP: 'Japonais', EU: 'Toutes langues', CN: 'Chinois', KR: 'Coréen' };
 const COND_SEALED = { NEUF: { l: 'Neuf parfait', m: 1 }, ABIME: { l: 'Blister abîmé', m: 0.85 }, OUVERT: { l: 'Ouvert', m: 0.6 } };
 const COND_CARD = { M: { l: 'Mint', m: 1.1 }, NM: { l: 'Near Mint', m: 1 }, EX: { l: 'Excellent', m: 0.78 }, GD: { l: 'Good', m: 0.6 }, PL: { l: 'Played', m: 0.45 }, PO: { l: 'Poor', m: 0.3 } };
@@ -946,7 +947,7 @@ function registerProducts(j) {
   }
   EXTRA = j.rows.map(r => {
     const set = r[fi.set] ? 't:' + r[fi.set] : '';
-    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '', pimg: fi.pimg != null && r[fi.pimg] ? r[fi.pimg] : '' };
+    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '', pimg: fi.pimg != null && r[fi.pimg] ? String(r[fi.pimg]) : '', hid: fi.hid != null && r[fi.hid] ? 1 : 0 };
   });
   CMF.catalog = EXTRA.map(p => ({ id: p.cm, name: prodName(p) + (p.en ? ' · ' + p.en : ''), cat: TYPES[p.type] || '', exp: setName(p), t: toks(`${p.name} ${p.en} ${SETS[p.set]?.en || ''} ${setName(p)} ${p.number}`) }));
   CMF.catalogCount = EXTRA.length;
@@ -1031,7 +1032,7 @@ async function autoLoad(silent) {
 
 /* ============ Images : photos officielles des cartes et photos personnelles ============ */
 // Cartes : image officielle fournie par TCGdex (en français, sinon en anglais).
-const tcgImg = (p, q = 'low') => p && p.img ? `https://assets.tcgdex.net/fr/${p.img}/${q}.webp` : null;
+const tcgImg = (p, q = 'low') => !p || !p.img ? null : p.img.startsWith('ja:') ? `https://assets.tcgdex.net/ja/${p.img.slice(3)}/${q}.webp` : `https://assets.tcgdex.net/fr/${p.img}/${q}.webp`;
 // Photos personnelles : rangées dans le navigateur (IndexedDB), compressées pour rester légères.
 const PH = { db: null, covers: {}, counts: {}, ready: null };
 function phOpen() {
@@ -1156,9 +1157,14 @@ function colorsFor(p) {
 function thumb(p, size = 56, itemId) {
   const cover = typeof PH !== 'undefined' && p && ((itemId && PH.covers[itemId]) || PH.covers['p:' + p.id]);
   if (cover) return `<img class="pic" src="${cover}" width="${size}" height="${size}" style="width:${size}px;height:${size}px" alt="">`;
-  if (p && p.pimg) return `<img class="pic box" src="https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(p.pimg)}_200w.jpg" data-ref="${esc(p.id)}" data-size="${size}" style="width:${size}px;height:${size}px" loading="lazy" alt="${esc(prodName(p))}">`;
+  if (p && p.pimg) {
+    // photo exacte (n° TCGplayer), photo indicative (~n°) ou logo de l'extension (logo:série/extension)
+    const pi = String(p.pimg);
+    if (pi.startsWith('logo:')) { const u = `https://assets.tcgdex.net/fr/${pi.slice(5)}/logo.webp`; return `<img class="pic box logo" src="${u}" data-alt="${u.replace('/fr/', '/en/')}" data-ref="${esc(p.id)}" data-size="${size}" style="width:${size}px;height:${size}px" loading="lazy" alt="${esc(prodName(p))}">`; }
+    return `<img class="pic box" src="https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(pi.replace(/^~/, ''))}_200w.jpg" data-ref="${esc(p.id)}" data-size="${size}" style="width:${size}px;height:${size}px" loading="lazy" alt="${esc(prodName(p))}">`;
+  }
   const u = typeof tcgImg === 'function' ? tcgImg(p) : null;
-  if (u) return `<img class="pic card" src="${u}" data-alt="${u.replace('/fr/', '/en/')}" data-ref="${esc(p.id)}" data-size="${size}" style="height:${size}px;width:${Math.round(size * .727)}px" loading="lazy" alt="${esc(prodName(p))}">`;
+  if (u) return `<img class="pic card" src="${u}" ${u.includes('/fr/') ? `data-alt="${u.replace('/fr/', '/en/')}"` : ''} data-ref="${esc(p.id)}" data-size="${size}" style="height:${size}px;width:${Math.round(size * .727)}px" loading="lazy" alt="${esc(prodName(p))}">`;
   return thumbSvg(p, size);
 }
 function thumbSvg(p, size = 56) {
@@ -1181,7 +1187,7 @@ function thumbSvg(p, size = 56) {
     case 'CARD': b = `<rect x="24" y="8" width="52" height="84" rx="5" fill="#E8C55A"/><rect x="28" y="12" width="44" height="76" rx="3" fill="${g}"/><rect x="31" y="17" width="38" height="30" rx="2" fill="rgba(255,255,255,.22)"/><rect x="31" y="52" width="38" height="3" rx="1.5" fill="rgba(255,255,255,.35)"/><rect x="31" y="59" width="26" height="3" rx="1.5" fill="rgba(255,255,255,.35)"/><rect x="28" y="12" width="44" height="76" rx="3" fill="${f}"/>`; break;
     default: b = `<rect x="16" y="20" width="68" height="62" rx="5" fill="${g}"/><rect x="16" y="20" width="68" height="62" rx="5" fill="${f}"/>`;
   }
-  const lang = p?.lang ? `<rect x="3" y="80" width="23" height="15" rx="3" fill="rgba(10,14,28,.78)"/><text x="14.5" y="91" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff" font-family="Archivo,system-ui,sans-serif">${esc(p.lang)}</text>` : '';
+  const lang = p?.lang && p.lang !== 'EU' && !(typeof EXTRA !== 'undefined' && EXTRA.length) ? `<rect x="3" y="80" width="23" height="15" rx="3" fill="rgba(10,14,28,.78)"/><text x="14.5" y="91" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff" font-family="Archivo,system-ui,sans-serif">${esc(p.lang)}</text>` : '';
   return `<svg width="${size}" height="${size}" viewBox="0 0 100 100" role="img" aria-label="${esc(prodName(p))}"><defs><linearGradient id="g${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient><linearGradient id="f${id}" x1="0" y1="0" x2="1" y2="1"><stop offset=".2" stop-color="#fff" stop-opacity="0"/><stop offset=".42" stop-color="#fff" stop-opacity=".4"/><stop offset=".5" stop-color="#C9F3FF" stop-opacity=".25"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/></linearGradient></defs><ellipse cx="50" cy="94" rx="34" ry="3.5" fill="rgba(0,0,0,.22)"/>${b}${lang}</svg>`;
 }
 
@@ -1347,7 +1353,7 @@ function countUp(el, to) {
 const ui = {
   view: 'total', period: 'Tout', filter: 'all', donut: 'type', counted: false,
   mtab: 'all', msort: 'pvp', q: '', sel: new Set(),
-  catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catSetId: '', catBulk: false, catLimit: 60,
+  catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catSetId: '', catBulk: false, catCardLang: '', catLimit: 60,
   pPeriod: '6M', iPeriod: '6M', cmpPeriod: '6M', cmpMode: 'idx',
 };
 const chips = (act, cur, opts, label) => `<div class="chips" role="group" aria-label="${esc(label)}">${opts.map(([v, l, n]) => `<button type="button" class="chip" data-act="${act}" data-v="${v}" aria-pressed="${v === cur}">${esc(l)}${n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>`;
@@ -1357,6 +1363,8 @@ const condLabel = (it, p) => p?.kind === 'card' ? (it.grade?.org ? `${it.grade.o
 const owned = ref => state.items.filter(it => it.ref === ref && !it.sold).reduce((a, it) => a + it.qty, 0);
 const RAR_FR = { 'common': 'Commune', 'uncommon': 'Peu commune', 'rare': 'Rare', 'rare holo': 'Rare holo', 'double rare': 'Double rare', 'illustration rare': 'Illustration rare', 'special illustration rare': 'Illustration spéciale rare', 'ultra rare': 'Ultra rare', 'hyper rare': 'Hyper rare', 'secret rare': 'Rare secrète', 'shiny rare': 'Rare chromatique', 'shiny ultra rare': 'Ultra rare chromatique', 'amazing rare': 'Rare magnifique', 'radiant rare': 'Rare radieuse', 'ace spec rare': 'ACE SPEC', 'mega hyper rare': 'Méga hyper rare', 'promo': 'Promo' };
 const rarFr = r => RAR_FR[String(r || '').toLowerCase()] || r || '';
+// Langue affichée seulement pour l'ancien catalogue de démonstration (le catalogue Cardmarket est entièrement en version française).
+const langTxt = p => !p || !p.lang || p.lang === 'EU' ? '' : p.kind === 'card' && p.lang === 'JP' ? 'Japonaise' : EXTRA.length ? '' : (LANGS[p.lang] || p.lang);
 const gainChip = (v, p) => `<span class="gain ${cls(v)}">${eurS(v)}${p != null ? ` (${pct(p)})` : ''}</span>`;
 function alertsTriggered() { return state.alerts.filter(a => { const c = marketAt(a.ref, T); return c != null && (a.op === '>' ? c >= a.price : c <= a.price); }); }
 function srcShort(ref, it) {
@@ -1459,7 +1467,7 @@ VIEWS.total = function () {
     <div class="stat"><dt>Marché sur 30 jours</dt><dd class="${cls(v30)}">${pct(v30)}<small class="${cls(v7)}">${pct(v7)} sur 7 j</small></dd></div>
   </dl>
   <div class="cols">
-    <section class="panel"><div class="panel-head"><h2>Répartition</h2>${chips('donut', ui.donut, [['type', 'Type'], ['set', 'Extension'], ['lang', 'Langue']], 'Répartir par')}</div>${donut(groups(ui.donut))}</section>
+    <section class="panel"><div class="panel-head"><h2>Répartition</h2>${chips('donut', ui.donut, [['type', 'Type'], ['set', 'Extension'], ...(EXTRA.length ? [] : [['lang', 'Langue']])], 'Répartir par')}</div>${donut(groups(ui.donut))}</section>
     <section class="panel"><div class="panel-head"><h2>Plus-values par produit</h2><button class="btn sm ghost" data-go="mine">Tout voir</button></div>${perf}</section>
   </div>`;
 };
@@ -1485,7 +1493,7 @@ function itemRow(r) {
   return `<div class="item">
     <div class="ck"><input type="checkbox" class="chk" data-sel="${it.id}" aria-label="Sélectionner pour comparer" ${ui.sel.has(it.id) ? 'checked' : ''}></div>
     <div class="art" data-item="${it.id}">${thumb(r.p, 56, it.id)}</div>
-    <div class="nm" data-item="${it.id}" tabindex="0"><b>${esc(r.name)}</b><small>${esc(r.set)}, ${esc(r.p?.lang || '')}, ${esc(condLabel(it, r.p))}</small></div>
+    <div class="nm" data-item="${it.id}" tabindex="0"><b>${esc(r.name)}</b><small>${esc([r.set, langTxt(r.p), condLabel(it, r.p)].filter(Boolean).join(', '))}</small></div>
     <div class="cells">
       <div><span class="lbl">Quantité</span><div class="stepper"><button type="button" data-act="qty" data-id="${it.id}" data-v="-1" aria-label="Retirer un exemplaire">−</button><span>${it.qty}</span><button type="button" data-act="qty" data-id="${it.id}" data-v="1" aria-label="Ajouter un exemplaire">+</button></div></div>
       <div><span class="lbl">Prix d’achat unitaire</span><input class="inline" type="text" inputmode="decimal" data-inline="buy" data-id="${it.id}" value="${String(it.buyPrice).replace('.', ',')}" aria-label="Prix d’achat unitaire"></div>
@@ -1539,10 +1547,11 @@ function siblings(p) {
 function catFiltered() {
   const q = ui.catQ.trim().toLowerCase();
   let ps = Object.values(PROD);
-  if (EXTRA.length) ps = ps.filter(p => !p.demo);
+  if (EXTRA.length) ps = ps.filter(p => !p.demo && (!p.hid || owned(p.id)));
   if (!ui.catBulk) ps = ps.filter(p => variantOf(p)[0] !== 'bulk');
   if (ui.catSetId) ps = ps.filter(p => p.set === ui.catSetId);
   if (ui.catKind) ps = ps.filter(p => p.kind === ui.catKind);
+  if (ui.catKind === 'card' && ui.catCardLang) ps = ps.filter(p => p.kind === 'card' && (p.lang === 'JP') === (ui.catCardLang === 'JP'));
   if (ui.catType) ps = ps.filter(p => p.type === ui.catType);
   if (ui.catLang) ps = ps.filter(p => p.lang === ui.catLang);
   if (ui.catSerie) ps = ps.filter(p => (SETS[p.set]?.serie || 'Autres produits') === ui.catSerie);
@@ -1552,7 +1561,7 @@ function catFiltered() {
 }
 function tile(p) {
   const c = marketAt(p.id, T), v = variation(d => marketAt(p.id, d), 30), o = owned(p.id), w = state.wishlist.some(x => x.ref === p.id), l = state.cm.links[p.id];
-  return `<div class="tile" data-prod="${p.id}" tabindex="0"><button type="button" class="add" data-act="additem" data-ref="${p.id}" aria-label="Ajouter ${esc(prodName(p))} à ma collection">${ICON.plus}</button><div class="stage">${thumb(p, 104)}</div><div class="nm">${esc(prodName(p))}</div><div class="meta">${esc(setName(p))}${p.auto ? (p.kind === 'card' ? (p.rarity ? `, ${esc(rarFr(p.rarity))}` : '') : `, ${esc(TYPES[p.type] || '')}${p.lang !== 'EU' ? ', ' + esc(LANGS[p.lang] || p.lang) : ''}`) : `, ${esc(p.lang)}`}</div><div class="row"><span class="price">${c == null ? '<span class="muted small">Pas encore de cote</span>' : esc(eur(c))}</span>${c != null ? `<b class="small ${cls(v)}">${pct(v)}</b>` : ''}</div>${(() => { const [vk, vl] = variantOf(p); const showV = vk !== 'std' || (p.kind === 'sealed' && siblings(p).some(x => variantOf(x)[0] !== 'bulk'));
+  return `<div class="tile" data-prod="${p.id}" tabindex="0"><button type="button" class="add" data-act="additem" data-ref="${p.id}" aria-label="Ajouter ${esc(prodName(p))} à ma collection">${ICON.plus}</button><div class="stage">${thumb(p, 104)}</div><div class="nm">${esc(prodName(p))}</div><div class="meta">${esc(setName(p))}${p.auto ? (p.kind === 'card' ? (p.rarity && p.rarity !== 'None' ? `, ${esc(rarFr(p.rarity))}` : '') + (p.lang === 'JP' ? ', Japonaise' : '') : `, ${esc(TYPES[p.type] || '')}`) : (langTxt(p) ? `, ${esc(langTxt(p))}` : '')}</div><div class="row"><span class="price">${c == null ? '<span class="muted small">Pas encore de cote</span>' : esc(eur(c))}</span>${c != null ? `<b class="small ${cls(v)}">${pct(v)}</b>` : ''}</div>${(() => { const [vk, vl] = variantOf(p); const showV = vk !== 'std' || (p.kind === 'sealed' && siblings(p).some(x => variantOf(x)[0] !== 'bulk'));
     return o || w || (l && !p.cm) || showV ? `<div class="flags">${showV ? `<span class="tag ${vk === 'std' ? 'high' : vk === 'pc' ? 'manual' : ''}">${esc(vl)}</span>` : ''}${o ? `<span class="tag on">${o} possédé${o > 1 ? 's' : ''}</span>` : ''}${l && !p.cm ? '<span class="tag cm">Cardmarket</span>' : ''}${w ? '<span class="tag">Wishlist</span>' : ''}</div>` : ''; })()}</div>`;
 }
 function catList() {
@@ -1569,9 +1578,9 @@ VIEWS.catalog = function () {
   <button class="btn" data-act="custom">${ICON.plus}Produit absent</button></div>
   <div class="toolbar"><input type="search" data-model="catQ" placeholder="Nom, extension, numéro de carte, EAN" value="${esc(ui.catQ)}" aria-label="Rechercher dans le catalogue" autocomplete="off">
   ${chips('catKind', ui.catKind, [['', 'Tout'], ['sealed', 'Scellé'], ['card', 'Cartes']], 'Famille')}
-  ${ui.catKind !== 'card' ? `<button type="button" class="chip" data-act="catBulk" aria-pressed="${ui.catBulk}">Cartons revendeurs</button>` : ''}
+  ${ui.catKind !== 'card' ? `<button type="button" class="chip" data-act="catBulk" aria-pressed="${ui.catBulk}">Cartons revendeurs</button>` : EXTRA.length ? chips('catCardLang', ui.catCardLang, [['', 'Toutes les langues'], ['EU', 'Anglaises'], ['JP', 'Japonaises']], 'Langue des cartes') : ''}
   ${ui.catKind !== 'card' ? `<select data-model="catType" aria-label="Type"><option value="">Tous les types</option>${Object.entries(TYPES).filter(([k]) => k !== 'CARD').map(([k, l]) => `<option value="${k}" ${k === ui.catType ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : ''}
-  <select data-model="catLang" aria-label="Langue"><option value="">Toutes les langues</option>${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${k === ui.catLang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+  ${EXTRA.length ? '' : `<select data-model="catLang" aria-label="Langue"><option value="">Toutes les langues</option>${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${k === ui.catLang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`}</div>
   <div class="toolbar">${series.length > 8
     ? `<select data-model="catSerie" aria-label="Série"><option value="">Toutes les séries</option>${series.map(x => `<option ${x === ui.catSerie ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
        <select data-model="catSetId" aria-label="Extension"><option value="">Toutes les extensions</option>${setsIn.map(k => `<option value="${esc(k)}" ${k === ui.catSetId ? 'selected' : ''}>${esc(SETS[k].fr)}</option>`).join('')}</select>`
@@ -1588,7 +1597,7 @@ VIEWS.watch = function () {
   <section class="section"><h2>Wishlist</h2><p>Ajoute un produit depuis sa fiche dans le catalogue.</p>
   ${wl.length ? `<ul class="list">${wl.map(w => {
     const p = P(w.ref), c = marketAt(w.ref, T), v = variation(d => marketAt(w.ref, d), 30);
-    return `<li>${thumb(p, 44)}<div class="grow" data-prod="${p.id}" tabindex="0" style="cursor:pointer"><b>${esc(prodName(p))}</b><span class="muted small">${esc(setName(p))}, ${esc(p.lang)}</span></div><div style="text-align:right"><b>${esc(eur(c))}</b><br><span class="small ${cls(v)}">${pct(v)} sur 30 j</span></div><button class="btn sm" data-act="alert" data-ref="${p.id}">Alerte</button><button class="icon-btn" data-act="unwish" data-ref="${p.id}" aria-label="Retirer de la wishlist">${ICON.trash}</button></li>`;
+    return `<li>${thumb(p, 44)}<div class="grow" data-prod="${p.id}" tabindex="0" style="cursor:pointer"><b>${esc(prodName(p))}</b><span class="muted small">${esc([setName(p), langTxt(p)].filter(Boolean).join(', '))}</span></div><div style="text-align:right"><b>${esc(eur(c))}</b><br><span class="small ${cls(v)}">${pct(v)} sur 30 j</span></div><button class="btn sm" data-act="alert" data-ref="${p.id}">Alerte</button><button class="icon-btn" data-act="unwish" data-ref="${p.id}" aria-label="Retirer de la wishlist">${ICON.trash}</button></li>`;
   }).join('')}</ul>` : '<div class="empty" style="padding:30px 20px"><p style="margin-bottom:12px">Ta wishlist est vide.</p><button class="btn" data-go="catalog">Parcourir le catalogue</button></div>'}
   </section>
   <section class="section"><h2>Alertes de prix</h2><p>Une alerte se déclenche quand le prix de marché franchit ton seuil.</p>
@@ -1680,20 +1689,20 @@ function openProduct(id) {
   const wished = state.wishlist.some(w => w.ref === id);
   const grades = p.kind === 'card' && cur ? [['Near Mint (raw)', 1], ['Excellent (raw)', .78], ['PSA 9', 1.55], ['PSA 10', 3.6], ['BGS 10', 4.5]] : [];
   const used = state.items.some(it => it.ref === id);
-  const sub = [esc(setName(p)) + (SETS[p.set] ? ` (${esc(SETS[p.set].code)})` : ''), esc(LANGS[p.lang] || p.lang), esc(p.kind === 'card' ? rarFr(p.rarity) || 'Carte' : TYPES[p.type]), p.ean ? 'EAN ' + esc(p.ean) : ''].filter(Boolean).join(', ');
+  const sub = [esc(setName(p)) + (SETS[p.set] ? ` (${esc(SETS[p.set].code)})` : ''), esc(langTxt(p)), esc(p.kind === 'card' ? rarFr(p.rarity) || 'Carte' : TYPES[p.type]), p.ean ? 'EAN ' + esc(p.ean) : ''].filter(Boolean).join(', ');
   openModal(`${modalHead(prodName(p), sub, p)}
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap"><p class="big-price">${esc(eur(cur))}</p><span class="tag ${src.c}">${esc(src.t)}</span></div>
-    <p class="muted small" style="margin-top:4px">${p.kind === 'card' ? 'Prix d’une carte Near Mint non gradée' : 'Prix d’un produit neuf, scellé'}</p>
+    <p class="muted small" style="margin-top:4px">${p.kind === 'card' ? 'Prix d’une carte Near Mint non gradée' : 'Prix d’un produit neuf, scellé'}${p.pimg && /^(~|logo:)/.test(String(p.pimg)) && !PH.covers['p:' + p.id] ? ' · <span class="tag">Photo indicative</span>' : ''}</p>
     <div class="vars"><div>7 jours<b class="${cls(v(7))}">${pct(v(7))}</b></div><div>30 jours<b class="${cls(v(30))}">${pct(v(30))}</b></div><div>1 an<b class="${cls(v(365))}">${pct(v(365))}</b></div>${sinceMsrp != null ? `<div>Depuis la sortie<b class="${cls(sinceMsrp)}">${pct(sinceMsrp)}</b><span class="small">prix conseillé ${esc(eur(p.msrp))}</span></div>` : ''}</div>
     <div class="panel-head" style="margin:14px 0 6px"><h3>Historique du prix</h3>${seg('pPeriod', ui.pPeriod, PERIODS, 'Période')}</div>
     ${cur != null && pts.filter(x => x.v != null).length < 2 ? `<div class="empty" style="padding:22px 16px"><p style="margin-bottom:12px">${AUTO.on && p.cm && !PREV[id] ? 'Chargement de l’historique du prix…' : 'La courbe de ce produit se remplit chaque jour dès qu’il est dans ta collection ou ta wishlist.'}</p><div class="actions"><button class="btn" data-act="wish" data-ref="${id}">${ICON.heart}Suivre dans ma wishlist</button></div></div>` : cur == null ? `<div class="empty" style="padding:26px 16px"><p style="margin-bottom:12px">Pas encore de cote pour ce produit. Relie-le à Cardmarket, ou fais un relevé eBay qui reconstitue la courbe des 3 derniers mois.</p><div class="actions"><button class="btn primary" data-act="cmlink" data-ref="${id}">Relier à Cardmarket</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button></div></div>` : chartDiv('prod', { h: 220, aria: 'Historique du prix', series })}
     ${(() => { const l = state.cm.links[id], g = p.cm && CMF.guide ? CMF.guide.get(p.cm) : null, last = state.cm.last[id] || (g ? { ...g, d: CMF.guideDate } : null);
-      if (p.cm) return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:4px"><h3>Cardmarket</h3><span class="tag cm">Prix automatique</span></div><p class="muted small">${last ? `Prix du ${esc(dfr(di(last.d)))}` : 'Prix en attente'}${p.lang === 'EU' ? ', toutes langues confondues sur Cardmarket' : ''}${p.en && p.en !== p.name ? `. Nom sur Cardmarket : ${esc(p.en)}` : ''}.</p>${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`;
+      if (p.cm) return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:4px"><h3>Cardmarket</h3><span class="tag cm">Prix automatique</span></div><p class="muted small">${last ? `Prix du ${esc(dfr(di(last.d)))}` : 'Prix en attente'}.</p>${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`;
       return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:${last ? 4 : 0}px"><h3>Cardmarket</h3><button class="btn sm" data-act="cmlink" data-ref="${id}">${EXTRA.length ? 'Remplacer par le produit Cardmarket' : l ? 'Changer le lien' : 'Relier à Cardmarket'}</button></div>${l ? `<p class="muted small">Relié à « ${esc(l.name)} »${last ? `, prix du ${esc(dfr(di(last.d)))}` : ', en attente du prochain import des prix'}</p>` : '<p class="muted small" style="margin-top:6px">Relie ce produit pour suivre sa tendance et ses moyennes de vente.</p>'}${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`; })()}
     ${(() => { const sib = p.kind === 'sealed' && !p.demo ? siblings(p).filter(x => variantOf(x)[0] !== 'bulk' || variantOf(p)[0] === 'bulk') : [];
       if (!sib.length) return '';
       const [vk, vl] = variantOf(p);
-      return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:6px"><h3>Autres versions de ce produit</h3><span class="tag ${vk === 'std' ? 'high' : vk === 'pc' ? 'manual' : ''}">Ici : ${esc(vl)}</span></div><p class="muted small" style="margin-bottom:10px">Cardmarket vend plusieurs versions sous des noms proches. Vérifie que tu choisis celle que tu possèdes : leurs prix sont très différents.</p><ul class="list">${sib.slice(0, 8).map(x => `<li class="click" data-prod="${x.id}">${thumb(x, 40)}<div class="grow"><b>${esc(prodName(x))}</b><span class="muted small">${esc(variantOf(x)[1])}${x.en ? ` · ${esc(x.en)}` : ''}</span></div><b>${esc(eur(marketAt(x.id, T)))}</b></li>`).join('')}</ul></div>`; })()}
+      return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:6px"><h3>Autres versions de ce produit</h3><span class="tag ${vk === 'std' ? 'high' : vk === 'pc' ? 'manual' : ''}">Ici : ${esc(vl)}</span></div><p class="muted small" style="margin-bottom:10px">Cardmarket vend plusieurs versions sous des noms proches. Vérifie que tu choisis celle que tu possèdes : leurs prix sont très différents.</p><ul class="list">${sib.slice(0, 8).map(x => `<li class="click" data-prod="${x.id}">${thumb(x, 40)}<div class="grow"><b>${esc(prodName(x))}</b><span class="muted small">${esc(variantOf(x)[1])}</span></div><b>${esc(eur(marketAt(x.id, T)))}</b></li>`).join('')}</ul></div>`; })()}
     <h3 style="margin:20px 0 6px">Photo du produit</h3>
     <p class="muted small" style="margin-bottom:10px">Elle s’affiche dans le catalogue et pour tous tes exemplaires de ce produit. ${p.kind === 'sealed' ? `Pas de photo sous la main ? <a href="https://www.google.com/search?tbm=isch&q=${encodeURIComponent((p.en || prodName(p)) + ' pokemon')}" target="_blank" rel="noopener">Chercher une image sur Google</a>, enregistre-la, puis ajoute-la ici.` : 'L’image officielle de la carte est utilisée tant que tu n’en ajoutes pas.'}</p>
     <div class="photos" id="ph-grid"><span class="muted small">Chargement…</span></div>
@@ -1718,7 +1727,7 @@ function openItem(id) {
   for (let d = from; d <= T; d++) { pts.push({ d, v: marketUnit(it, d) }); if (d >= buyD && d <= endD) buy.push({ d, v: it.buyPrice }); }
   const v = k => variation(d => marketUnit(it, d), k);
   const nMkt = pts.filter(x => x.v != null).length;
-  const sub = [esc(r.set), esc(LANGS[p?.lang] || ''), esc(condLabel(it, p))].filter(Boolean).join(', ');
+  const sub = [esc(r.set), esc(langTxt(p)), esc(condLabel(it, p))].filter(Boolean).join(', ');
   const realized = it.sold ? (it.sold.price - it.buyPrice) * it.qty : null;
   openModal(`${modalHead(r.name, sub, p, it.id)}
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap"><p class="big-price">${esc(eur(it.sold ? it.sold.price : r.u))}</p><span class="muted">${it.sold ? 'prix de vente unitaire' : `l’unité, soit ${esc(eur(r.tot))} pour ${it.qty}`}</span>${it.sold ? '' : `<span class="tag ${src.c}">${esc(src.t)}</span>`}</div>
@@ -2050,7 +2059,7 @@ function importCollection(text) {
 function insuranceHTML() {
   const rows = state.items.filter(isHeld).map(rowData).sort((a, b) => b.tot - a.tot);
   const t = totals();
-  const tr = rows.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.set)}</td><td>${esc(r.p?.lang || '')}</td><td>${esc(condLabel(r.it, r.p))}</td><td class="n">${r.it.qty}</td><td>${esc(dfr(di(r.it.buyDate)))}</td><td class="n">${esc(eur(r.it.buyPrice * r.it.qty))}</td><td class="n">${esc(eur(r.tot))}</td><td>${esc(r.it.storage || '')}</td></tr>`).join('');
+  const tr = rows.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.set)}</td><td>${esc(langTxt(r.p))}</td><td>${esc(condLabel(r.it, r.p))}</td><td class="n">${r.it.qty}</td><td>${esc(dfr(di(r.it.buyDate)))}</td><td class="n">${esc(eur(r.it.buyPrice * r.it.qty))}</td><td class="n">${esc(eur(r.tot))}</td><td>${esc(r.it.storage || '')}</td></tr>`).join('');
   return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Inventaire de collection, ${esc(dfr(T))}</title><style>body{font-family:system-ui,sans-serif;color:#111;margin:32px}h1{font-size:22px;margin:0 0 4px}p{margin:0 0 16px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f4f4f6}.n{text-align:right}tfoot td{font-weight:700;border-top:2px solid #111}</style></head><body><h1>Inventaire de collection Pokémon TCG</h1><p>Établi le ${esc(dfr(T))} avec PokéCol. Valeurs de marché estimées à cette date.</p><table><thead><tr><th>Objet</th><th>Extension</th><th>Langue</th><th>État</th><th class="n">Qté</th><th>Acheté le</th><th class="n">Prix d’achat</th><th class="n">Valeur estimée</th><th>Rangement</th></tr></thead><tbody>${tr}</tbody><tfoot><tr><td colspan="6">Total, ${t.n} objets</td><td class="n">${esc(eur(t.inv))}</td><td class="n">${esc(eur(t.val))}</td><td></td></tr></tfoot></table></body></html>`;
 }
 async function offerFile(filename, data) {
@@ -2111,7 +2120,7 @@ const ACT = {
   cview: d => { ui.cview = d.v; render(); },
   clearsel: () => { ui.sel.clear(); render(); },
   compare: () => openCompare(),
-  catKind: d => { ui.catKind = d.v; if (d.v === 'card') ui.catType = ''; render(); },
+  catKind: d => { ui.catKind = d.v; if (d.v === 'card') ui.catType = ''; else ui.catCardLang = ''; render(); },
   pPeriod: d => { ui.pPeriod = d.v; refreshModal(); },
   iPeriod: d => { ui.iPeriod = d.v; refreshModal(); },
   cmpMode: d => { ui.cmpMode = d.v; refreshModal(); },
@@ -2134,6 +2143,7 @@ const ACT = {
   trackedjson: () => { const ids = [...new Set(Object.entries(state.cm.links).filter(([r, l]) => l.id && P(r)?.kind === 'card').map(([, l]) => l.id))]; offerFile('tracked.json', JSON.stringify(ids)); },
   mtab: d => { ui.mtab = d.v; render(); },
   catBulk: () => { ui.catBulk = !ui.catBulk; ui.catLimit = 60; render(); },
+  catCardLang: d => { ui.catCardLang = d.v; ui.catLimit = 60; render(); },
   catSerie: d => { ui.catSerie = d.v; ui.catSetId = ''; ui.catLimit = 60; render(); },
   more: () => { ui.catLimit += 60; $('#list').innerHTML = catList(); },
   qty: d => { const it = state.items.find(x => x.id === d.id); if (!it) return; const q = it.qty + +d.v; if (q < 1) { toast('Pour retirer cet objet, ouvre-le puis choisis Supprimer.'); return; } it.qty = q; rebuild(); Store.save(); $('#list').innerHTML = mineList(); },
