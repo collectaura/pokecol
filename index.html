@@ -609,8 +609,12 @@ function mult(it, p) {
 // Valeur unitaire d'un objet de la collection à un jour donné.
 function unitAt(it, d) {
   if (it.manual && d >= clampDay(di(it.manual.date))) return it.manual.price;
-  const base = marketAt(it.ref, d);
-  if (base == null) return it.buyPrice;
+  let base = marketAt(it.ref, d);
+  if (base == null) {
+    // Avant le premier prix connu : on prolonge ce premier prix plutôt que d'afficher le prix d'achat.
+    const imp = IMP[it.ref];
+    if (imp && d < imp[0][0]) base = imp[0][1]; else return it.buyPrice;
+  }
   return Math.round(base * mult(it, P(it.ref)) * 100) / 100;
 }
 // Prix de marché d'un objet (sans repli sur le prix d'achat) : sert aux courbes et aux variations.
@@ -1387,7 +1391,12 @@ function groups(by) {
 function cmBanner() {
   const owners = [...new Set(state.items.filter(isHeld).map(it => it.ref))];
   if (!owners.length) return '';
-  const linked = owners.filter(r => state.cm.links[r]).length;
+  const linked = owners.filter(r => cmIdOf(r)).length;
+  if (AUTO.on) {
+    if (AUTO.error) return `<div class="banner warn">${ICON.tag}<div style="flex:1"><b>Prix Cardmarket en attente</b><p class="muted small">${esc(AUTO.error)}</p></div></div>`;
+    if (linked < owners.length) return `<div class="banner">${ICON.tag}<div style="flex:1"><b>${owners.length - linked} objet${owners.length - linked > 1 ? 's' : ''} sans prix Cardmarket</b><p class="muted small">Ils viennent de l’ancien catalogue et restent estimés à leur prix d’achat. Remplace-les par leur version Cardmarket.</p></div><button class="btn sm" data-go="prices">Remplacer</button></div>`;
+    return '';
+  }
   const lastD = Math.max(-1, ...Object.values(state.cm.last).map(l => di(l.d)));
   if (!linked) return `<div class="banner warn">${ICON.tag}<div style="flex:1"><b>Branche les prix Cardmarket</b><p class="muted small">Tes objets sont pour l’instant estimés à leur prix d’achat. Relie-les à Cardmarket pour suivre leur vraie valeur.</p></div><button class="btn sm primary" data-go="prices">Configurer</button></div>`;
   if (lastD < T - 1) return `<div class="banner">${ICON.tag}<div style="flex:1"><b>Prix Cardmarket ${lastD >= 0 ? `du ${esc(dfr(lastD))}` : 'à charger'}</b><p class="muted small">${linked} produit${linked > 1 ? 's' : ''} relié${linked > 1 ? 's' : ''} sur ${owners.length}. Importe le guide des prix du jour pour mettre à jour toute ta collection.</p></div><button class="btn sm" data-go="prices">Mettre à jour</button></div>`;
@@ -1395,7 +1404,11 @@ function cmBanner() {
 }
 VIEWS.total = function () {
   if (!state.items.length) return emptyState('Ta collection commence ici', 'Ajoute tes displays, ETB et cartes avec leur prix d’achat. PokéCol suit leur valeur Cardmarket et te montre ta plus-value au fil du temps.');
-  const from = periodFrom(ui.period);
+  // La courbe commence au premier prix de marché connu : avant, il n'y a pas d'historique.
+  let ms = Infinity; for (const it of state.items) if (!it.sold && IMP[it.ref]) ms = Math.min(ms, IMP[it.ref][0][0]);
+  const pf = periodFrom(ui.period);
+  const from = ms !== Infinity && ms > pf && ms < T - 1 ? ms : pf;
+  const histNote = from > pf ? `Historique des prix disponible depuis le ${dfr(from)}.` : 'Survole la courbe pour voir la valeur à chaque date.';
   const t = totalsFor(ui.filter, from), all = totals();
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
   const vs = t.vs;
@@ -1421,7 +1434,7 @@ VIEWS.total = function () {
       <div class="hero-ctrl">${chips('filter', ui.filter, [['all', 'Tout'], ['sealed', 'Scellé'], ['card', 'Cartes']], 'Filtrer')}${chips('period', ui.period, PERIODS, 'Période')}</div>
     </div>
     <div class="chart" data-chart="main" style="height:300px" role="img" aria-label="Évolution de la valeur de la collection"></div>
-    <div class="legend"><span><i style="background:var(--accent)"></i>Valeur de marché</span><span><i class="dash"></i>Montant investi</span><span>Survole la courbe pour voir la valeur à chaque date.</span></div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Valeur de marché</span><span><i class="dash"></i>Montant investi</span><span>${esc(histNote)}</span></div>
   </section>
   <dl class="stats">
     <div class="stat"><dt>Plus-value latente</dt><dd class="${cls(all.pv)}">${eurS(all.pv, false)}<small>${pct(all.pvp)}</small></dd></div>
