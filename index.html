@@ -950,6 +950,7 @@ function registerProducts(j) {
   CMF.catalog = EXTRA.map(p => ({ id: p.cm, name: prodName(p) + (p.en ? ' · ' + p.en : ''), cat: TYPES[p.type] || '', exp: setName(p), t: toks(`${p.name} ${p.en} ${SETS[p.set]?.en || ''} ${setName(p)} ${p.number}`) }));
   CMF.catalogCount = EXTRA.length;
   AUTO.count = EXTRA.length;
+  SIB = null;
   rebuild();
 }
 // Archive publique du guide des prix Cardmarket (un relevé par jour depuis le 16 septembre 2026),
@@ -1111,7 +1112,7 @@ async function openLightbox(id, item) {
   });
   document.body.appendChild(lb);
 }
-function refreshListArt() { if (['mine', 'total'].includes(ui.view)) { const y = scrollY; render(); scrollTo(0, y); } }
+function refreshListArt() { if (['mine', 'total', 'catalog'].includes(ui.view)) { const y = scrollY; render(); scrollTo(0, y); } }
 // Si une image officielle manque : version anglaise, puis vignette dessinée.
 document.addEventListener('error', e => {
   const t = e.target;
@@ -1152,7 +1153,7 @@ function colorsFor(p) {
 }
 // Vignette d'un produit : photo personnelle de l'objet, sinon image officielle de la carte, sinon boîte dessinée.
 function thumb(p, size = 56, itemId) {
-  const cover = itemId && typeof PH !== 'undefined' && PH.covers[itemId];
+  const cover = typeof PH !== 'undefined' && p && ((itemId && PH.covers[itemId]) || PH.covers['p:' + p.id]);
   if (cover) return `<img class="pic" src="${cover}" width="${size}" height="${size}" style="width:${size}px;height:${size}px" alt="">`;
   const u = typeof tcgImg === 'function' ? tcgImg(p) : null;
   if (u) return `<img class="pic card" src="${u}" data-alt="${u.replace('/fr/', '/en/')}" data-ref="${esc(p.id)}" data-size="${size}" style="height:${size}px;width:${Math.round(size * .727)}px" loading="lazy" alt="${esc(prodName(p))}">`;
@@ -1344,7 +1345,7 @@ function countUp(el, to) {
 const ui = {
   view: 'total', period: 'Tout', filter: 'all', donut: 'type', counted: false,
   mtab: 'all', msort: 'pvp', q: '', sel: new Set(),
-  catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catSetId: '', catLimit: 60,
+  catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catSetId: '', catBulk: false, catLimit: 60,
   pPeriod: '6M', iPeriod: '6M', cmpPeriod: '6M', cmpMode: 'idx',
 };
 const chips = (act, cur, opts, label) => `<div class="chips" role="group" aria-label="${esc(label)}">${opts.map(([v, l, n]) => `<button type="button" class="chip" data-act="${act}" data-v="${v}" aria-pressed="${v === cur}">${esc(l)}${n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>`;
@@ -1516,21 +1517,41 @@ VIEWS.mine = function () {
 };
 
 /* ============ Catalogue ============ */
+// Versions d'un même produit sur Cardmarket : standard, exclusif Pokémon Center, carton revendeur…
+function variantOf(p) {
+  const n = p.en || p.name || '';
+  if (p.kind !== 'sealed') return ['std', ''];
+  if (/pok[ée]mon center/i.test(n)) return ['pc', 'Exclusif Pokémon Center'];
+  if (/\bcase\b/i.test(n) || /(box|bundle) display$/i.test(n)) return ['bulk', 'Carton revendeur'];
+  const m = n.match(/\[([A-Z0-9]{3,6})\]/); if (m) return ['code', 'Variante ' + m[1]];
+  if (/\((3|6) cards\)|fun pack/i.test(n)) return ['small', 'Petit format'];
+  return ['std', 'Version standard'];
+}
+const TYPE_ORDER = ['DISPLAY', 'ETB', 'BUNDLE', 'HALF_DISPLAY', 'UPC', 'COFFRET', 'TRIPACK', 'BLISTER', 'BOOSTER', 'TIN', 'DECK', 'AUTRE', 'CARD'];
+const VAR_ORDER = ['std', 'code', 'pc', 'small', 'bulk'];
+let SIB = null;     // produits de même extension et même type
+function siblings(p) {
+  if (!SIB) { SIB = {}; for (const x of Object.values(PROD)) if (x.kind === 'sealed' && x.set && !x.demo) (SIB[x.set + '|' + x.type] ||= []).push(x); }
+  return (SIB[p.set + '|' + p.type] || []).filter(x => x.id !== p.id);
+}
 function catFiltered() {
   const q = ui.catQ.trim().toLowerCase();
   let ps = Object.values(PROD);
   if (EXTRA.length) ps = ps.filter(p => !p.demo);
+  if (!ui.catBulk) ps = ps.filter(p => variantOf(p)[0] !== 'bulk');
   if (ui.catSetId) ps = ps.filter(p => p.set === ui.catSetId);
   if (ui.catKind) ps = ps.filter(p => p.kind === ui.catKind);
   if (ui.catType) ps = ps.filter(p => p.type === ui.catType);
   if (ui.catLang) ps = ps.filter(p => p.lang === ui.catLang);
   if (ui.catSerie) ps = ps.filter(p => (SETS[p.set]?.serie || 'Autres produits') === ui.catSerie);
   if (q) { const qs = norm(q).split(' ').filter(Boolean); ps = ps.filter(p => { const h = norm([prodName(p), p.en, setName(p), SETS[p.set]?.en, SETS[p.set]?.code, p.number, p.ean, TYPES[p.type], p.rarity].filter(Boolean).join(' ')); return qs.every(w => h.includes(w)); }); }
-  return ps.sort((a, b) => (SETS[b.set]?.date || b.release || '').localeCompare(SETS[a.set]?.date || a.release || '') || b.kind.localeCompare(a.kind) || prodName(a).localeCompare(prodName(b), 'fr', { numeric: true }));
+  const to = p => { const i = TYPE_ORDER.indexOf(p.type); return i < 0 ? 99 : i; }, vo = p => VAR_ORDER.indexOf(variantOf(p)[0]);
+  return ps.sort((a, b) => (SETS[b.set]?.date || b.release || '').localeCompare(SETS[a.set]?.date || a.release || '') || b.kind.localeCompare(a.kind) || to(a) - to(b) || vo(a) - vo(b) || prodName(a).localeCompare(prodName(b), 'fr', { numeric: true }));
 }
 function tile(p) {
   const c = marketAt(p.id, T), v = variation(d => marketAt(p.id, d), 30), o = owned(p.id), w = state.wishlist.some(x => x.ref === p.id), l = state.cm.links[p.id];
-  return `<div class="tile" data-prod="${p.id}" tabindex="0"><button type="button" class="add" data-act="additem" data-ref="${p.id}" aria-label="Ajouter ${esc(prodName(p))} à ma collection">${ICON.plus}</button><div class="stage">${thumb(p, 104)}</div><div class="nm">${esc(prodName(p))}</div><div class="meta">${esc(setName(p))}${p.auto ? (p.kind === 'card' ? (p.rarity ? `, ${esc(rarFr(p.rarity))}` : '') : `, ${esc(TYPES[p.type] || '')}${p.lang !== 'EU' ? ', ' + esc(LANGS[p.lang] || p.lang) : ''}`) : `, ${esc(p.lang)}`}</div><div class="row"><span class="price">${c == null ? '<span class="muted small">Pas encore de cote</span>' : esc(eur(c))}</span>${c != null ? `<b class="small ${cls(v)}">${pct(v)}</b>` : ''}</div>${o || w || l ? `<div class="flags">${o ? `<span class="tag on">${o} possédé${o > 1 ? 's' : ''}</span>` : ''}${l ? '<span class="tag cm">Cardmarket</span>' : ''}${w ? '<span class="tag">Wishlist</span>' : ''}</div>` : ''}</div>`;
+  return `<div class="tile" data-prod="${p.id}" tabindex="0"><button type="button" class="add" data-act="additem" data-ref="${p.id}" aria-label="Ajouter ${esc(prodName(p))} à ma collection">${ICON.plus}</button><div class="stage">${thumb(p, 104)}</div><div class="nm">${esc(prodName(p))}</div><div class="meta">${esc(setName(p))}${p.auto ? (p.kind === 'card' ? (p.rarity ? `, ${esc(rarFr(p.rarity))}` : '') : `, ${esc(TYPES[p.type] || '')}${p.lang !== 'EU' ? ', ' + esc(LANGS[p.lang] || p.lang) : ''}`) : `, ${esc(p.lang)}`}</div><div class="row"><span class="price">${c == null ? '<span class="muted small">Pas encore de cote</span>' : esc(eur(c))}</span>${c != null ? `<b class="small ${cls(v)}">${pct(v)}</b>` : ''}</div>${(() => { const [vk, vl] = variantOf(p); const showV = vk !== 'std' || (p.kind === 'sealed' && siblings(p).some(x => variantOf(x)[0] !== 'bulk'));
+    return o || w || (l && !p.cm) || showV ? `<div class="flags">${showV ? `<span class="tag ${vk === 'std' ? 'high' : vk === 'pc' ? 'manual' : ''}">${esc(vl)}</span>` : ''}${o ? `<span class="tag on">${o} possédé${o > 1 ? 's' : ''}</span>` : ''}${l && !p.cm ? '<span class="tag cm">Cardmarket</span>' : ''}${w ? '<span class="tag">Wishlist</span>' : ''}</div>` : ''; })()}</div>`;
 }
 function catList() {
   const ps = catFiltered();
@@ -1546,6 +1567,7 @@ VIEWS.catalog = function () {
   <button class="btn" data-act="custom">${ICON.plus}Produit absent</button></div>
   <div class="toolbar"><input type="search" data-model="catQ" placeholder="Nom, extension, numéro de carte, EAN" value="${esc(ui.catQ)}" aria-label="Rechercher dans le catalogue" autocomplete="off">
   ${chips('catKind', ui.catKind, [['', 'Tout'], ['sealed', 'Scellé'], ['card', 'Cartes']], 'Famille')}
+  ${ui.catKind !== 'card' ? `<button type="button" class="chip" data-act="catBulk" aria-pressed="${ui.catBulk}">Cartons revendeurs</button>` : ''}
   ${ui.catKind !== 'card' ? `<select data-model="catType" aria-label="Type"><option value="">Tous les types</option>${Object.entries(TYPES).filter(([k]) => k !== 'CARD').map(([k, l]) => `<option value="${k}" ${k === ui.catType ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>` : ''}
   <select data-model="catLang" aria-label="Langue"><option value="">Toutes les langues</option>${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${k === ui.catLang ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
   <div class="toolbar">${series.length > 8
@@ -1666,10 +1688,18 @@ function openProduct(id) {
     ${(() => { const l = state.cm.links[id], g = p.cm && CMF.guide ? CMF.guide.get(p.cm) : null, last = state.cm.last[id] || (g ? { ...g, d: CMF.guideDate } : null);
       if (p.cm) return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:4px"><h3>Cardmarket</h3><span class="tag cm">Prix automatique</span></div><p class="muted small">${last ? `Prix du ${esc(dfr(di(last.d)))}` : 'Prix en attente'}${p.lang === 'EU' ? ', toutes langues confondues sur Cardmarket' : ''}${p.en && p.en !== p.name ? `. Nom sur Cardmarket : ${esc(p.en)}` : ''}.</p>${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`;
       return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:${last ? 4 : 0}px"><h3>Cardmarket</h3><button class="btn sm" data-act="cmlink" data-ref="${id}">${EXTRA.length ? 'Remplacer par le produit Cardmarket' : l ? 'Changer le lien' : 'Relier à Cardmarket'}</button></div>${l ? `<p class="muted small">Relié à « ${esc(l.name)} »${last ? `, prix du ${esc(dfr(di(last.d)))}` : ', en attente du prochain import des prix'}</p>` : '<p class="muted small" style="margin-top:6px">Relie ce produit pour suivre sa tendance et ses moyennes de vente.</p>'}${last ? `<div class="cmgrid">${Object.entries(CM_FIELDS).map(([k, lb]) => `<div class="${k === state.cm.field ? 'sel' : ''}">${lb}<b>${last[k] != null ? esc(eur(last[k])) : '—'}</b></div>`).join('')}</div>` : ''}</div>`; })()}
+    ${(() => { const sib = p.kind === 'sealed' && !p.demo ? siblings(p).filter(x => variantOf(x)[0] !== 'bulk' || variantOf(p)[0] === 'bulk') : [];
+      if (!sib.length) return '';
+      const [vk, vl] = variantOf(p);
+      return `<div class="panel" style="margin-top:16px;padding:16px"><div class="panel-head" style="margin-bottom:6px"><h3>Autres versions de ce produit</h3><span class="tag ${vk === 'std' ? 'high' : vk === 'pc' ? 'manual' : ''}">Ici : ${esc(vl)}</span></div><p class="muted small" style="margin-bottom:10px">Cardmarket vend plusieurs versions sous des noms proches. Vérifie que tu choisis celle que tu possèdes : leurs prix sont très différents.</p><ul class="list">${sib.slice(0, 8).map(x => `<li class="click" data-prod="${x.id}">${thumb(x, 40)}<div class="grow"><b>${esc(prodName(x))}</b><span class="muted small">${esc(variantOf(x)[1])}${x.en ? ` · ${esc(x.en)}` : ''}</span></div><b>${esc(eur(marketAt(x.id, T)))}</b></li>`).join('')}</ul></div>`; })()}
+    <h3 style="margin:20px 0 6px">Photo du produit</h3>
+    <p class="muted small" style="margin-bottom:10px">Elle s’affiche dans le catalogue et pour tous tes exemplaires de ce produit. ${p.kind === 'sealed' ? `Pas de photo sous la main ? <a href="https://www.google.com/search?tbm=isch&q=${encodeURIComponent((p.en || prodName(p)) + ' pokemon')}" target="_blank" rel="noopener">Chercher une image sur Google</a>, enregistre-la, puis ajoute-la ici.` : 'L’image officielle de la carte est utilisée tant que tu n’en ajoutes pas.'}</p>
+    <div class="photos" id="ph-grid"><span class="muted small">Chargement…</span></div>
     ${grades.length ? `<h3 style="margin:16px 0 8px">Selon l’état et la gradation</h3><dl class="kv">${grades.map(([l, m]) => `<dt>${l}</dt><dd><b>${esc(eur(cur * m))}</b></dd>`).join('')}</dl><p class="muted small" style="margin-top:6px">Estimations par coefficient à partir du prix Near Mint. Importe des relevés gradés pour plus de précision.</p>` : ''}
     ${mine.length ? `<p style="margin-top:14px">Tu en possèdes <b>${mine.reduce((a, it) => a + it.qty, 0)}</b>.</p>` : ''}
     <div class="modal-foot">${p.custom && !used ? `<button class="btn ghost danger" data-act="delcustom" data-ref="${id}">Retirer du catalogue</button>` : ''}<button class="btn" data-act="wish" data-ref="${id}" aria-pressed="${wished}">${ICON.heart}${wished ? 'Dans ta wishlist' : 'Wishlist'}</button><button class="btn" data-act="alert" data-ref="${id}">${ICON.bell}Alerte</button><button class="btn" data-act="ebay" data-ref="${id}">Cote eBay</button><button class="btn primary" data-act="additem" data-ref="${id}" autofocus>${ICON.plus}Ajouter à ma collection</button></div>`);
   modalCtx = { kind: 'prod', id };
+  renderPhotos('p:' + id);
   if (AUTO.on && p.cm && !IMP[id] && !PREV[id]) previewProduct(id).then(ok => { if (ok && modalCtx && modalCtx.kind === 'prod' && modalCtx.id === id) openProduct(id); });
 }
 let modalCtx = null;
@@ -2101,6 +2131,7 @@ const ACT = {
   autoreload: () => autoLoad(false),
   trackedjson: () => { const ids = [...new Set(Object.entries(state.cm.links).filter(([r, l]) => l.id && P(r)?.kind === 'card').map(([, l]) => l.id))]; offerFile('tracked.json', JSON.stringify(ids)); },
   mtab: d => { ui.mtab = d.v; render(); },
+  catBulk: () => { ui.catBulk = !ui.catBulk; ui.catLimit = 60; render(); },
   catSerie: d => { ui.catSerie = d.v; ui.catSetId = ''; ui.catLimit = 60; render(); },
   more: () => { ui.catLimit += 60; $('#list').innerHTML = catList(); },
   qty: d => { const it = state.items.find(x => x.id === d.id); if (!it) return; const q = it.qty + +d.v; if (q < 1) { toast('Pour retirer cet objet, ouvre-le puis choisis Supprimer.'); return; } it.qty = q; rebuild(); Store.save(); $('#list').innerHTML = mineList(); },
