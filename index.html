@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>PokéVault Tracker</title>
+<title>PokéCol</title>
 <script>window.POKEVAULT_DATA = "data/";</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -195,6 +195,18 @@ label.f{display:flex;flex-direction:column;gap:6px;font-size:.87rem;color:var(--
 .tile .flags{display:flex;gap:6px;flex-wrap:wrap}
 @media (prefers-reduced-motion:reduce){.tile{transform:none!important;transition:none}.tile .stage::after{display:none}.btn:active{transform:none}}
 
+/* Images et photos */
+img.pic{display:block;object-fit:cover;border-radius:10px;background:var(--surface-2)}
+img.pic.card{object-fit:contain;background:none;border-radius:5px;filter:drop-shadow(0 4px 8px rgba(0,0,0,.3))}
+.photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:10px}
+.ph{position:relative;aspect-ratio:1;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface);padding:0;cursor:pointer}
+.ph img{width:100%;height:100%;object-fit:cover;display:block}
+.ph .tag{position:absolute;left:6px;bottom:6px}
+.ph.add{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:var(--muted);border-style:dashed;font-size:.82rem}
+.ph.add svg{width:22px;height:22px}
+.lightbox{position:fixed;inset:0;z-index:70;background:rgba(5,6,14,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:20px 16px calc(20px + env(safe-area-inset-bottom,0px))}
+.lightbox img{max-width:100%;max-height:calc(100% - 70px);object-fit:contain;border-radius:12px}
+.lb-bar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
 /* Lists */
 .list{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);overflow:hidden}
 .list li{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line)}
@@ -282,12 +294,12 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85em;backgroun
 </head>
 <body>
 <div class="topbar">
-  <button class="brand" data-go="total" aria-label="PokéVault, collection totale"><span id="logo-m"></span><span><b>PokéVault</b></span></button>
+  <button class="brand" data-go="total" aria-label="PokéCol, collection totale"><span id="logo-m"></span><span><b>PokéCol</b></span></button>
   <div class="r"><div class="sync" id="sync-m"><i></i></div><button class="icon-btn" id="theme-m" aria-label="Changer de thème"></button></div>
 </div>
 <div class="shell">
   <aside class="side">
-    <button class="brand" data-go="total" aria-label="PokéVault, collection totale"><span id="logo"></span><span><b>PokéVault</b><small>Tracker de collection</small></span></button>
+    <button class="brand" data-go="total" aria-label="PokéCol, collection totale"><span id="logo"></span><span><b>PokéCol</b><small>Tracker de collection</small></span></button>
     <nav id="nav" aria-label="Navigation principale"></nav>
     <div class="side-foot">
       <div class="sync" id="sync"><i></i><span>Local</span></div>
@@ -924,7 +936,7 @@ function registerProducts(j) {
   }
   EXTRA = j.rows.map(r => {
     const set = r[fi.set] ? 't:' + r[fi.set] : '';
-    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true };
+    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '' };
   });
   CMF.catalog = EXTRA.map(p => ({ id: p.cm, name: prodName(p) + (p.en ? ' · ' + p.en : ''), cat: TYPES[p.type] || '', exp: setName(p), t: toks(`${p.name} ${p.en} ${SETS[p.set]?.en || ''} ${setName(p)} ${p.number}`) }));
   CMF.catalogCount = EXTRA.length;
@@ -1006,6 +1018,99 @@ async function autoLoad(silent) {
   } finally { AUTO.busy = false; }
 }
 
+/* ============ Images : photos officielles des cartes et photos personnelles ============ */
+// Cartes : image officielle fournie par TCGdex (en français, sinon en anglais).
+const tcgImg = (p, q = 'low') => p && p.img ? `https://assets.tcgdex.net/fr/${p.img}/${q}.webp` : null;
+// Photos personnelles : rangées dans le navigateur (IndexedDB), compressées pour rester légères.
+const PH = { db: null, covers: {}, counts: {}, ready: null };
+function phOpen() {
+  if (PH.ready) return PH.ready;
+  PH.ready = new Promise(res => {
+    try {
+      const r = indexedDB.open('pokevault-photos', 1);
+      r.onupgradeneeded = () => { const s = r.result.createObjectStore('photos', { keyPath: 'id' }); s.createIndex('item', 'item'); };
+      r.onsuccess = () => { PH.db = r.result; res(PH.db); };
+      r.onerror = () => res(null);
+    } catch (e) { res(null); }
+  });
+  return PH.ready;
+}
+const phTx = (mode) => PH.db.transaction('photos', mode).objectStore('photos');
+const phReq = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function phLoadCovers() {
+  if (!await phOpen()) return;
+  const all = await phReq(phTx('readonly').getAll());
+  Object.values(PH.covers).forEach(u => URL.revokeObjectURL(u));
+  PH.covers = {}; PH.counts = {};
+  const by = {};
+  for (const r of all) (by[r.item] ||= []).push(r);
+  for (const [item, rs] of Object.entries(by)) { rs.sort((a, b) => a.order - b.order); PH.covers[item] = URL.createObjectURL(rs[0].blob); PH.counts[item] = rs.length; }
+}
+async function phList(item) {
+  if (!await phOpen()) return [];
+  const rs = await phReq(phTx('readonly').index('item').getAll(item));
+  return rs.sort((a, b) => a.order - b.order);
+}
+async function compressImage(file, max = 1400) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return await new Promise(res => c.toBlob(res, 'image/jpeg', .82));
+}
+async function phAdd(item, files) {
+  if (!await phOpen()) { toast('Les photos ne sont pas disponibles dans ce navigateur.'); return 0; }
+  const existing = await phList(item);
+  let order = existing.length ? existing[existing.length - 1].order + 1 : 0, n = 0;
+  for (const f of [...files].slice(0, 12)) {
+    if (!/^image\//.test(f.type) && !/\.(jpe?g|png|webp|heic)$/i.test(f.name)) continue;
+    try { const blob = await compressImage(f); await phReq(phTx('readwrite').put({ id: uid(), item, blob, order: order++, added: Date.now() })); n++; }
+    catch (e) { /* image illisible : ignorée */ }
+  }
+  await phLoadCovers();
+  return n;
+}
+async function phDelete(id) { if (!await phOpen()) return; await phReq(phTx('readwrite').delete(id)); await phLoadCovers(); }
+async function phDeleteItem(item) { for (const r of await phList(item)) await phReq(phTx('readwrite').delete(r.id)); await phLoadCovers(); }
+async function phMakeCover(id, item) {
+  const rs = await phList(item); const tx = phTx('readwrite');
+  let o = 1; for (const r of rs) { r.order = r.id === id ? 0 : o++; tx.put(r); }
+  await new Promise(res => { tx.transaction.oncomplete = res; tx.transaction.onerror = res; });
+  await phLoadCovers();
+}
+async function renderPhotos(item) {
+  const box = $('#ph-grid'); if (!box) return;
+  const rs = await phList(item);
+  box.querySelectorAll('img').forEach(i => URL.revokeObjectURL(i.src));
+  box.innerHTML = rs.map((r, i) => `<button type="button" class="ph" data-act="phview" data-id="${r.id}" data-item="${item}" aria-label="Agrandir la photo ${i + 1}"><img src="${URL.createObjectURL(r.blob)}" alt="">${i === 0 ? '<span class="tag on">Principale</span>' : ''}</button>`).join('')
+    + `<label class="ph add"><input type="file" accept="image/*" multiple data-photo="${item}" class="sr">${ICON.plus}<span>Ajouter</span></label>`;
+}
+async function openLightbox(id, item) {
+  const rs = await phList(item), r = rs.find(x => x.id === id); if (!r) return;
+  const lb = document.createElement('div');
+  lb.className = 'lightbox'; lb.setAttribute('role', 'dialog'); lb.setAttribute('aria-modal', 'true');
+  const url = URL.createObjectURL(r.blob);
+  lb.innerHTML = `<img src="${url}" alt=""><div class="lb-bar">${rs[0].id !== id ? `<button class="btn sm" data-lb="cover">Définir comme photo principale</button>` : ''}<button class="btn sm danger" data-lb="del">${ICON.trash}Supprimer</button><button class="btn sm primary" data-lb="close">Fermer</button></div>`;
+  const close = () => { URL.revokeObjectURL(url); lb.remove(); };
+  lb.addEventListener('click', async e => {
+    const a = e.target.closest('[data-lb]');
+    if (!a) { if (e.target === lb) close(); return; }
+    e.stopPropagation();
+    if (a.dataset.lb === 'cover') { await phMakeCover(id, item); toast('Photo principale changée'); }
+    if (a.dataset.lb === 'del') { await phDelete(id); toast('Photo supprimée'); }
+    close(); renderPhotos(item); refreshListArt();
+  });
+  document.body.appendChild(lb);
+}
+function refreshListArt() { if (['mine', 'total'].includes(ui.view)) { const y = scrollY; render(); scrollTo(0, y); } }
+// Si une image officielle manque : version anglaise, puis vignette dessinée.
+document.addEventListener('error', e => {
+  const t = e.target;
+  if (!(t instanceof HTMLImageElement) || !t.dataset.ref) return;
+  if (t.dataset.alt) { const a = t.dataset.alt; delete t.dataset.alt; t.src = a; return; }
+  t.outerHTML = thumbSvg(P(t.dataset.ref), +t.dataset.size || 56);
+}, true);
+
 /* ============ Icônes ============ */
 const ic = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 const ICON = {
@@ -1036,7 +1141,15 @@ function colorsFor(p) {
   const h = hash(p.setName || p.name || p.id) % 360;
   return [`hsl(${h} 55% 48%)`, `hsl(${(h + 70) % 360} 50% 34%)`];
 }
-function thumb(p, size = 56) {
+// Vignette d'un produit : photo personnelle de l'objet, sinon image officielle de la carte, sinon boîte dessinée.
+function thumb(p, size = 56, itemId) {
+  const cover = itemId && typeof PH !== 'undefined' && PH.covers[itemId];
+  if (cover) return `<img class="pic" src="${cover}" width="${size}" height="${size}" style="width:${size}px;height:${size}px" alt="">`;
+  const u = typeof tcgImg === 'function' ? tcgImg(p) : null;
+  if (u) return `<img class="pic card" src="${u}" data-alt="${u.replace('/fr/', '/en/')}" data-ref="${esc(p.id)}" data-size="${size}" style="height:${size}px;width:${Math.round(size * .727)}px" loading="lazy" alt="${esc(prodName(p))}">`;
+  return thumbSvg(p, size);
+}
+function thumbSvg(p, size = 56) {
   const id = 'v' + (TH++);
   const [c1, c2] = colorsFor(p);
   const g = `url(#g${id})`, f = `url(#f${id})`;
@@ -1169,7 +1282,7 @@ function openModal(html, narrow) {
   if (f) f.focus({ preventScroll: true });
 }
 function closeModal() { $('#modal-root').innerHTML = ''; $('#tip').hidden = true; if (lastFocus && lastFocus.focus) lastFocus.focus({ preventScroll: true }); lastFocus = null; }
-const modalHead = (title, sub, p) => `<div class="modal-head">${p ? thumb(p, 72) : ''}<div><h2>${esc(title)}</h2>${sub ? `<p class="muted small" style="margin-top:4px">${sub}</p>` : ''}</div><button class="icon-btn x" data-act="close" aria-label="Fermer">${ICON.x}</button></div>`;
+const modalHead = (title, sub, p, itemId) => `<div class="modal-head">${p ? thumb(p, 72, itemId) : ''}<div><h2>${esc(title)}</h2>${sub ? `<p class="muted small" style="margin-top:4px">${sub}</p>` : ''}</div><button class="icon-btn x" data-act="close" aria-label="Fermer">${ICON.x}</button></div>`;
 let toastT = null;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 3200); }
 function setSync() {
@@ -1281,7 +1394,7 @@ function cmBanner() {
   return '';
 }
 VIEWS.total = function () {
-  if (!state.items.length) return emptyState('Ta collection commence ici', 'Ajoute tes displays, ETB et cartes avec leur prix d’achat. PokéVault suit leur valeur Cardmarket et te montre ta plus-value au fil du temps.');
+  if (!state.items.length) return emptyState('Ta collection commence ici', 'Ajoute tes displays, ETB et cartes avec leur prix d’achat. PokéCol suit leur valeur Cardmarket et te montre ta plus-value au fil du temps.');
   const from = periodFrom(ui.period);
   const t = totalsFor(ui.filter, from), all = totals();
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
@@ -1293,7 +1406,7 @@ VIEWS.total = function () {
     onLeave: () => { $('#hero-v').textContent = eur(t.v); $('#hero-g').innerHTML = gainChip(t.g, t.gp); $('#hero-i').textContent = `pour ${eur(t.i, false)} investis`; $('#hero-d').textContent = 'Aujourd’hui'; },
   };
   const rows = state.items.filter(isHeld).map(rowData).filter(r => r.pvp != null).sort((a, b) => b.pvp - a.pvp);
-  const li = r => `<li data-item="${r.it.id}" tabindex="0">${thumb(r.p, 38)}<span class="nm">${esc(r.name)}</span>${gainChip(r.pv, r.pvp)}</li>`;
+  const li = r => `<li data-item="${r.it.id}" tabindex="0">${thumb(r.p, 38, r.it.id)}<span class="nm">${esc(r.name)}</span>${gainChip(r.pv, r.pvp)}</li>`;
   const perf = rows.length <= 5 ? `<ul class="perf">${rows.map(li).join('')}</ul>`
     : `<p class="perf-h">Meilleures plus-values</p><ul class="perf">${rows.slice(0, 5).map(li).join('')}</ul><p class="perf-h">Moins bonnes</p><ul class="perf">${rows.slice(-5).reverse().map(li).join('')}</ul>`;
   const v30 = marketVar(30), v7 = marketVar(7);
@@ -1337,12 +1450,12 @@ function itemRow(r) {
   const w = Math.min(100, Math.abs((r.pvp || 0) * 100));
   if (it.sold) {
     const g = (it.sold.price - it.buyPrice) * it.qty;
-    return `<div class="item"><div class="ck"></div><div class="art" data-item="${it.id}">${thumb(r.p, 56)}</div><div class="nm" data-item="${it.id}" tabindex="0"><b>${esc(r.name)}</b><small>${esc(r.set)}, vendu le ${esc(dfr(di(it.sold.date)))}</small></div>
+    return `<div class="item"><div class="ck"></div><div class="art" data-item="${it.id}">${thumb(r.p, 56, it.id)}</div><div class="nm" data-item="${it.id}" tabindex="0"><b>${esc(r.name)}</b><small>${esc(r.set)}, vendu le ${esc(dfr(di(it.sold.date)))}</small></div>
     <div class="cells"><div><span class="lbl">Quantité</span><b>${it.qty}</b></div><div><span class="lbl">Achat unitaire</span><b>${esc(eur(it.buyPrice))}</b></div><div><span class="lbl">Vente unitaire</span><b>${esc(eur(it.sold.price))}</b></div><div class="pv"><span class="lbl">Gain réalisé</span><b class="${cls(g)}">${eurS(g)}</b><small class="${cls(g)}">${pct(it.sold.price / it.buyPrice - 1)}</small></div><div class="sp"></div></div></div>`;
   }
   return `<div class="item">
     <div class="ck"><input type="checkbox" class="chk" data-sel="${it.id}" aria-label="Sélectionner pour comparer" ${ui.sel.has(it.id) ? 'checked' : ''}></div>
-    <div class="art" data-item="${it.id}">${thumb(r.p, 56)}</div>
+    <div class="art" data-item="${it.id}">${thumb(r.p, 56, it.id)}</div>
     <div class="nm" data-item="${it.id}" tabindex="0"><b>${esc(r.name)}</b><small>${esc(r.set)}, ${esc(r.p?.lang || '')}, ${esc(condLabel(it, r.p))}</small></div>
     <div class="cells">
       <div><span class="lbl">Quantité</span><div class="stepper"><button type="button" data-act="qty" data-id="${it.id}" data-v="-1" aria-label="Retirer un exemplaire">−</button><span>${it.qty}</span><button type="button" data-act="qty" data-id="${it.id}" data-v="1" aria-label="Ajouter un exemplaire">+</button></div></div>
@@ -1465,7 +1578,7 @@ VIEWS.prices = function () {
   <div class="toolbar" style="margin-top:10px"><button class="btn" data-act="impprices">Importer ces prix</button><label class="btn ghost">Choisir un fichier CSV<input type="file" accept=".csv,.txt,text/csv" data-file="imp-prices" class="sr"></label>${nImp ? '<button class="btn ghost danger" data-act="clearimp">Effacer tous les prix relevés</button>' : ''}</div></section>
   <section class="section"><h2>Ta collection en fichier</h2><p>Export CSV pour Excel ou Google Sheets, et import dans le même format.</p>
   <div class="toolbar"><button class="btn" data-act="exportcsv" ${state.items.length ? '' : 'disabled'}>Exporter la collection</button><button class="btn" data-act="insurance" ${state.items.some(isHeld) ? '' : 'disabled'}>Rapport pour l’assurance</button></div>
-  <textarea id="imp-coll" placeholder="Colle ici un CSV exporté depuis PokéVault" aria-label="Collection à importer"></textarea>
+  <textarea id="imp-coll" placeholder="Colle ici un CSV exporté depuis PokéCol" aria-label="Collection à importer"></textarea>
   <div class="toolbar" style="margin-top:10px"><button class="btn" data-act="impcoll">Importer la collection</button><label class="btn ghost">Choisir un fichier CSV<input type="file" accept=".csv,.txt,text/csv" data-file="imp-coll" class="sr"></label></div></section>
   <section class="section"><h2>Réglages</h2><ul class="list">
     <li><div class="grow"><b>Prix de démonstration</b><span class="muted small">Prix fictifs pour tester l’appli. Désactivés, seules les vraies cotes apparaissent.</span></div><button class="btn sm" data-act="toggledemo">${state.settings.demo ? 'Désactiver' : 'Activer'}</button></li>
@@ -1549,7 +1662,7 @@ function openItem(id) {
   const nMkt = pts.filter(x => x.v != null).length;
   const sub = [esc(r.set), esc(LANGS[p?.lang] || ''), esc(condLabel(it, p))].filter(Boolean).join(', ');
   const realized = it.sold ? (it.sold.price - it.buyPrice) * it.qty : null;
-  openModal(`${modalHead(r.name, sub, p)}
+  openModal(`${modalHead(r.name, sub, p, it.id)}
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap"><p class="big-price">${esc(eur(it.sold ? it.sold.price : r.u))}</p><span class="muted">${it.sold ? 'prix de vente unitaire' : `l’unité, soit ${esc(eur(r.tot))} pour ${it.qty}`}</span>${it.sold ? '' : `<span class="tag ${src.c}">${esc(src.t)}</span>`}</div>
     <p style="margin-top:8px;font-weight:600" class="${cls(it.sold ? realized : r.pv)}">${it.sold ? `${eurS(realized)} de gain réalisé` : `${eurS(r.pv)} (${pct(r.pvp)}) de plus-value latente`}</p>
     <div class="vars"><div>7 jours<b class="${cls(v(7))}">${pct(v(7))}</b></div><div>30 jours<b class="${cls(v(30))}">${pct(v(30))}</b></div><div>1 an<b class="${cls(v(365))}">${pct(v(365))}</b></div></div>
@@ -1563,8 +1676,12 @@ function openItem(id) {
       ${it.storage ? `<dt>Rangement</dt><dd>${esc(it.storage)}</dd>` : ''}
       ${it.notes ? `<dt>Notes</dt><dd>${esc(it.notes)}</dd>` : ''}
     </dl>
+    <h3 style="margin:20px 0 10px">Mes photos</h3>
+    <div class="photos" id="ph-grid"><span class="muted small">Chargement…</span></div>
+    <p class="muted small" style="margin-top:6px">Tes photos sont gardées dans ce navigateur, sur cet appareil.</p>
     <div class="modal-foot"><button class="btn ghost danger" data-act="delitem" data-id="${it.id}">${ICON.trash}Supprimer</button><button class="btn" data-prod="${it.ref}">Fiche produit</button>${it.sold ? '' : `<button class="btn" data-act="ebay" data-ref="${it.ref}">Cote eBay</button>`}${it.sold ? `<button class="btn" data-act="unsell" data-id="${it.id}">Annuler la vente</button>` : `<button class="btn" data-act="manual" data-id="${it.id}">Prix manuel</button><button class="btn" data-act="sell" data-id="${it.id}">Vendre</button>`}<button class="btn primary" data-act="edititem" data-id="${it.id}" autofocus>Modifier</button></div>`);
   modalCtx = { kind: 'item', id };
+  renderPhotos(id);
 }
 
 /* ============ Formulaires ============ */
@@ -1585,6 +1702,7 @@ function openItemForm(ref, itemId) {
     ${card ? `<div class="form-grid" style="gap:10px"><label class="f"><span>Gradation</span><select name="org"><option value="">Non gradée</option>${GRADERS.map(g => `<option ${it?.grade?.org === g ? 'selected' : ''}>${g}</option>`).join('')}</select></label><label class="f"><span>Note</span><input type="number" name="note" min="1" max="10" step="0.5" value="${esc(it?.grade?.note || '')}"></label></div>` : '<div></div>'}
     <label class="f full"><span>Rangement</span><input type="text" name="storage" value="${esc(it?.storage || '')}" placeholder="Ex. armoire du bureau, bac 2"></label>
     <label class="f full"><span>Notes</span><input type="text" name="notes" value="${esc(it?.notes || '')}"></label>
+    ${it ? '' : '<label class="f full"><span>Photos (facultatif)</span><input type="file" name="photos" accept="image/*" multiple></label>'}
   </div><p class="err" id="f-err" role="alert"></p>
   <div class="modal-foot"><button type="button" class="btn ghost" data-act="close">Annuler</button><button type="submit" class="btn primary">${it ? 'Enregistrer' : 'Ajouter à ma collection'}</button></div></form>`, true);
   modalCtx = null;
@@ -1600,7 +1718,12 @@ function submitItem(f) {
   const data = { qty, buyPrice: Math.round(price * 100) / 100, buyDate: date, place: String(fd.get('place') || '').trim(), cond: fd.get('cond'), grade: org ? { org, note: String(note) } : null, storage: String(fd.get('storage') || '').trim(), notes: String(fd.get('notes') || '').trim() };
   const id = f.dataset.id;
   if (id) { Object.assign(state.items.find(x => x.id === id), data); closeModal(); commit('Modifications enregistrées'); openItem(id); }
-  else { state.items.push({ id: uid(), ref: f.dataset.ref, manual: null, sold: null, added: Date.now(), ...data }); closeModal(); commit('Ajouté à ta collection'); if (AUTO.on) autoLoad(true); }
+  else {
+    const nid = uid(), pin = f.querySelector('[name=photos]'), files = pin && pin.files ? [...pin.files] : [];
+    state.items.push({ id: nid, ref: f.dataset.ref, manual: null, sold: null, added: Date.now(), ...data }); closeModal(); commit('Ajouté à ta collection');
+    if (files.length) phAdd(nid, files).then(n => { if (n) { toast(`Ajouté avec ${n} photo${n > 1 ? 's' : ''}`); refreshListArt(); } });
+    if (AUTO.on) autoLoad(true);
+  }
 }
 function openSell(id) {
   const it = state.items.find(x => x.id === id); if (!it) return;
@@ -1870,7 +1993,7 @@ function insuranceHTML() {
   const rows = state.items.filter(isHeld).map(rowData).sort((a, b) => b.tot - a.tot);
   const t = totals();
   const tr = rows.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.set)}</td><td>${esc(r.p?.lang || '')}</td><td>${esc(condLabel(r.it, r.p))}</td><td class="n">${r.it.qty}</td><td>${esc(dfr(di(r.it.buyDate)))}</td><td class="n">${esc(eur(r.it.buyPrice * r.it.qty))}</td><td class="n">${esc(eur(r.tot))}</td><td>${esc(r.it.storage || '')}</td></tr>`).join('');
-  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Inventaire de collection, ${esc(dfr(T))}</title><style>body{font-family:system-ui,sans-serif;color:#111;margin:32px}h1{font-size:22px;margin:0 0 4px}p{margin:0 0 16px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f4f4f6}.n{text-align:right}tfoot td{font-weight:700;border-top:2px solid #111}</style></head><body><h1>Inventaire de collection Pokémon TCG</h1><p>Établi le ${esc(dfr(T))} avec PokéVault Tracker. Valeurs de marché estimées à cette date.</p><table><thead><tr><th>Objet</th><th>Extension</th><th>Langue</th><th>État</th><th class="n">Qté</th><th>Acheté le</th><th class="n">Prix d’achat</th><th class="n">Valeur estimée</th><th>Rangement</th></tr></thead><tbody>${tr}</tbody><tfoot><tr><td colspan="6">Total, ${t.n} objets</td><td class="n">${esc(eur(t.inv))}</td><td class="n">${esc(eur(t.val))}</td><td></td></tr></tfoot></table></body></html>`;
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Inventaire de collection, ${esc(dfr(T))}</title><style>body{font-family:system-ui,sans-serif;color:#111;margin:32px}h1{font-size:22px;margin:0 0 4px}p{margin:0 0 16px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f4f4f6}.n{text-align:right}tfoot td{font-weight:700;border-top:2px solid #111}</style></head><body><h1>Inventaire de collection Pokémon TCG</h1><p>Établi le ${esc(dfr(T))} avec PokéCol. Valeurs de marché estimées à cette date.</p><table><thead><tr><th>Objet</th><th>Extension</th><th>Langue</th><th>État</th><th class="n">Qté</th><th>Acheté le</th><th class="n">Prix d’achat</th><th class="n">Valeur estimée</th><th>Rangement</th></tr></thead><tbody>${tr}</tbody><tfoot><tr><td colspan="6">Total, ${t.n} objets</td><td class="n">${esc(eur(t.inv))}</td><td class="n">${esc(eur(t.val))}</td><td></td></tr></tfoot></table></body></html>`;
 }
 async function offerFile(filename, data) {
   if (DL) {
@@ -1943,7 +2066,8 @@ const ACT = {
   manual: d => openManual(d.id),
   unmanual: d => { const it = state.items.find(x => x.id === d.id); if (it) it.manual = null; closeModal(); commit('Retour au prix estimé'); openItem(d.id); },
   unsell: d => { const it = state.items.find(x => x.id === d.id); if (it) it.sold = null; closeModal(); commit('Vente annulée'); },
-  delitem: (d, el) => { if (!armed(el)) return; state.items = state.items.filter(x => x.id !== d.id); ui.sel.delete(d.id); closeModal(); commit('Objet supprimé'); },
+  delitem: (d, el) => { if (!armed(el)) return; state.items = state.items.filter(x => x.id !== d.id); ui.sel.delete(d.id); phDeleteItem(d.id); closeModal(); commit('Objet supprimé'); },
+  phview: d => openLightbox(d.id, d.item),
   wish: d => { const i = state.wishlist.findIndex(w => w.ref === d.ref); if (i >= 0) state.wishlist.splice(i, 1); else state.wishlist.push({ ref: d.ref, added: Date.now() }); commit(i >= 0 ? 'Retiré de la wishlist' : 'Ajouté à la wishlist'); refreshModal(); if (AUTO.on && i < 0) autoLoad(true).then(refreshModal); },
   unwish: d => { state.wishlist = state.wishlist.filter(w => w.ref !== d.ref); commit('Retiré de la wishlist'); },
   alert: d => openAlert(d.ref),
@@ -1993,7 +2117,7 @@ const ACT = {
   impcoll: () => {
     const ta = $('#imp-coll'); if (!ta.value.trim()) { toast('Colle un CSV de collection ou choisis un fichier.'); return; }
     const r = importCollection(ta.value);
-    commit(r.ok ? `${r.ok} objet${r.ok > 1 ? 's' : ''} importé${r.ok > 1 ? 's' : ''}${r.bad.length ? `, lignes ignorées : ${r.bad.slice(0, 5).join(', ')}` : ''}` : 'Aucun objet reconnu. Utilise les colonnes de l’export PokéVault.');
+    commit(r.ok ? `${r.ok} objet${r.ok > 1 ? 's' : ''} importé${r.ok > 1 ? 's' : ''}${r.bad.length ? `, lignes ignorées : ${r.bad.slice(0, 5).join(', ')}` : ''}` : 'Aucun objet reconnu. Utilise les colonnes de l’export PokéCol.');
   },
   insurance: () => offerFile(`inventaire-collection-${todayStr()}.html`, insuranceHTML()),
   reset: (d, el) => { if (!armed(el)) return; const th = state.settings.theme; state = DEFAULT_STATE(); state.settings.theme = th; ui.sel.clear(); ui.counted = false; commit('Tout a été effacé'); },
@@ -2048,6 +2172,11 @@ document.addEventListener('change', e => {
     return;
   }
   if (t.matches('[data-act-change="customkind"]')) { $$('[data-for]').forEach(el => el.hidden = el.dataset.for !== t.value); return; }
+  if (t.matches('input[data-photo]') && t.files && t.files.length) {
+    const item = t.dataset.photo; toast('Ajout des photos…');
+    phAdd(item, t.files).then(n => { toast(n ? `${n} photo${n > 1 ? 's' : ''} ajoutée${n > 1 ? 's' : ''}` : 'Aucune image reconnue.'); renderPhotos(item); refreshListArt(); });
+    return;
+  }
   if (t.matches('input[data-file]') && t.files && t.files[0]) {
     const target = $('#' + t.dataset.file);
     t.files[0].text().then(txt => { target.value = txt; toast('Fichier chargé. Vérifie puis importe.'); }).catch(() => toast('Impossible de lire ce fichier.'));
@@ -2116,6 +2245,7 @@ addEventListener('hashchange', () => { const v = location.hash.slice(1); if (VIE
     const n = alertsTriggered().length;
     if (n) toast(`${n} alerte${n > 1 ? 's' : ''} de prix déclenchée${n > 1 ? 's' : ''}`);
   });
+  phLoadCovers().then(() => { if (Object.keys(PH.covers).length) render(); });
   if (AUTO.on) { autoLoad(true); setInterval(() => autoLoad(true), 3600e3); }
   if (window.claude && typeof window.claude.use === 'function') window.claude.use('downloads').then(x => { DL = x; }).catch(() => { DL = null; });
 })();
