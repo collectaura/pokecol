@@ -2,6 +2,7 @@ name: Mise à jour des prix Cardmarket
 
 on:
   schedule:
+    # Cardmarket publie ses prix une fois par jour : le robot vérifie 3 fois pour ne pas rater la mise à jour.
     - cron: '17 3,9,15 * * *'
   workflow_dispatch: {}
 
