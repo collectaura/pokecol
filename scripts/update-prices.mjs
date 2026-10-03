@@ -134,6 +134,7 @@ for (const url of PRODUCT_URLS) {
     const cat = String(pick(r, 'categoryName', 'category') || (isNon ? 'Box Set' : 'Single'));
     if (id == null || !name || /single/i.test(cat) || !price.has(id)) continue;
     const type = typeOf(cat, name); if (!type) continue;
+    if (langOf(name) !== 'EU' || /\bUS version\b|\(US\)/i.test(name)) continue;   // uniquement les produits vendus en Europe (version française)
     const m = setByEn.find(([en]) => name === en || name.startsWith(en + ' ') || name.startsWith(en + ':'));
     sealed.push([id, 's', m ? frName(name, m[0], SETS[m[1]][0]) : name, name, m ? m[1] : '', '', '', type, langOf(name), '']);
   }
@@ -175,7 +176,7 @@ if (tcg && tcg.rows) {
   const grp = x => nrm(String(x).replace(/^[A-Za-z]{1,4}\d*\s*[:\-–]\s*/, ''));
   // « reste » du nom une fois retiré le nom de l'extension : « Scarlet & Violet 151 Elite Trainer Box » → « elite trainer box »
   const rest = (n, set) => { if (set && n.startsWith(set + ' ')) return n.slice(set.length + 1); const st = new Set(set.split(' ')); return n.split(' ').filter(w => !st.has(w)).join(' '); };
-  const all = tcg.rows.map(([id, name, g]) => { const n = nrm(name), gg = grp(g), r = rest(n, gg); return { id, n, g: gg, r, t: new Set(r.split(' ')) }; });
+  const all = tcg.rows.map(([id, name, g]) => { const n = nrm(name), gg = grp(g), r = rest(n, gg); return { id, n, g: gg, r, t: new Set(r.split(' ')), full: new Set(n.split(' ')) }; });
   const exact = new Map(); for (const x of all) (exact.get(x.n) || exact.set(x.n, []).get(x.n)).push(x.id);
   const jac = (a, b) => { let i = 0; for (const w of a) if (b.has(w)) i++; return i / (a.size + b.size - i); };
   let found = 0;
@@ -191,6 +192,16 @@ if (tcg && tcg.rows) {
       const same = pool.filter(x => x.r === r);
       const sc = same.length === 1 ? [[same[0], 1]] : pool.map(x => [x, jac(t, x.t)]).sort((a, b) => b[1] - a[1]);
       if (sc.length && sc[0][1] >= .8 && (!sc[1] || sc[0][1] - sc[1][1] >= .1)) id = sc[0][0].id;
+    }
+    if (!id) {
+      // Dernier essai sur tout le catalogue : noms très proches (« Lillie Premium Tournament Collection » ↔ « … Collection Box »)
+      const t = new Set(n.split(' '));
+      let best = null, b1 = 0, b2 = 0;
+      for (const x of all) {
+        const s2 = jac(t, x.full);
+        if (s2 > b1) { b2 = b1; b1 = s2; best = x; } else if (s2 > b2) b2 = s2;
+      }
+      if (best && b1 >= .75 && b1 - b2 >= .1) id = best.id;
     }
     row[9] = ''; row[10] = id || '';
     if (id) found++;
