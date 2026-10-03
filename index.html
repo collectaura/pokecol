@@ -335,7 +335,7 @@ function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; le
 const DAY = 864e5;
 const NOW = new Date();
 const T_UTC = Date.UTC(NOW.getFullYear(), NOW.getMonth(), NOW.getDate());
-const NDAYS = 731;                     // 2 ans d'historique
+const NDAYS = 1461;                    // 4 ans d'historique
 const START_UTC = T_UTC - (NDAYS - 1) * DAY;
 const T = NDAYS - 1;                   // index d'aujourd'hui
 function di(s) {
@@ -609,11 +609,16 @@ function mult(it, p) {
 // Valeur unitaire d'un objet de la collection à un jour donné.
 function unitAt(it, d) {
   if (it.manual && d >= clampDay(di(it.manual.date))) return it.manual.price;
-  let base = marketAt(it.ref, d);
+  const base = marketAt(it.ref, d);
   if (base == null) {
-    // Avant le premier prix connu : on prolonge ce premier prix plutôt que d'afficher le prix d'achat.
+    // Avant le premier prix connu : estimation linéaire entre le prix d'achat (le jour de l'achat)
+    // et le premier prix de marché connu.
     const imp = IMP[it.ref];
-    if (imp && d < imp[0][0]) base = imp[0][1]; else return it.buyPrice;
+    if (!imp || d >= imp[0][0]) return it.buyPrice;
+    const b = di(it.buyDate), f = imp[0][0], first = imp[0][1] * mult(it, P(it.ref));
+    if (isNaN(b) || b >= f) return Math.round(first * 100) / 100;
+    const k = Math.max(0, Math.min(1, (d - b) / (f - b)));
+    return Math.round((it.buyPrice + (first - it.buyPrice) * k) * 100) / 100;
   }
   return Math.round(base * mult(it, P(it.ref)) * 100) / 100;
 }
@@ -1242,7 +1247,7 @@ function drawLine(el, spec) {
       defs += `<linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${s.color}" stop-opacity=".22"/><stop offset="1" stop-color="${s.color}" stop-opacity="0"/></linearGradient>`;
       paths += `<path d="${line} L${X(pts[pts.length - 1].d).toFixed(1)} ${pt + ih} L${X(pts[0].d).toFixed(1)} ${pt + ih} Z" fill="url(#${gid})"/>`;
     }
-    paths += `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="${s.dash ? 1.5 : 2.2}" ${s.dash ? 'stroke-dasharray="5 4"' : ''} stroke-linejoin="round" stroke-linecap="round"/>`;
+    paths += `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="${s.dash ? 1.5 : s.dot ? 2 : 2.2}" ${s.dash ? 'stroke-dasharray="5 4"' : s.dot ? 'stroke-dasharray="1 5" opacity=".8"' : ''} stroke-linejoin="round" stroke-linecap="round"/>`;
     s.map = new Map(s.pts.map(p => [p.d, p.v]));
   });
   el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs>${defs}</defs>${g}${paths}<line class="guide" x1="0" x2="0" y1="${pt}" y2="${pt + ih}" stroke="var(--muted)" stroke-width="1" visibility="hidden"/><g class="dots"></g><rect x="${pl}" y="${pt}" width="${iw}" height="${ih}" fill="transparent" style="cursor:crosshair;touch-action:pan-y"/></svg>`;
@@ -1260,7 +1265,7 @@ function drawLine(el, spec) {
       th += `<div><span><i style="background:${s.color}"></i>${esc(s.label)}</span><span>${esc(spec.fmt === 'idx' ? v.toLocaleString('fr-FR', { maximumFractionDigits: 1 }) : eur(v))}</span></div>`;
     });
     dots.innerHTML = dh;
-    if (spec.onHover) { spec.onHover(d, ser.map(s => s.map.get(d))); if (spec.noTip) return; }
+    if (spec.onHover) { const o = {}; ser.forEach(s => { o[s.label] = s.map.get(d); }); spec.onHover(d, o); if (spec.noTip) return; }
     tip.innerHTML = th; tip.hidden = false;
     const tw = tip.offsetWidth, tht = tip.offsetHeight;
     let lx = e.clientX + 14, ly = e.clientY - tht - 10;
@@ -1331,7 +1336,7 @@ function countUp(el, to) {
 
 /* ============ État d'interface ============ */
 const ui = {
-  view: 'total', period: '6M', filter: 'all', donut: 'type', counted: false,
+  view: 'total', period: 'Tout', filter: 'all', donut: 'type', counted: false,
   mtab: 'all', msort: 'pvp', q: '', sel: new Set(),
   catQ: '', catKind: '', catType: '', catLang: '', catSerie: '', catSetId: '', catLimit: 60,
   pPeriod: '6M', iPeriod: '6M', cmpPeriod: '6M', cmpMode: 'idx',
@@ -1404,18 +1409,20 @@ function cmBanner() {
 }
 VIEWS.total = function () {
   if (!state.items.length) return emptyState('Ta collection commence ici', 'Ajoute tes displays, ETB et cartes avec leur prix d’achat. PokéCol suit leur valeur Cardmarket et te montre ta plus-value au fil du temps.');
-  // La courbe commence au premier prix de marché connu : avant, il n'y a pas d'historique.
-  let ms = Infinity; for (const it of state.items) if (!it.sold && IMP[it.ref]) ms = Math.min(ms, IMP[it.ref][0][0]);
-  const pf = periodFrom(ui.period);
-  const from = ms !== Infinity && ms > pf && ms < T - 1 ? ms : pf;
-  const histNote = from > pf ? `Historique des prix disponible depuis le ${dfr(from)}.` : 'Survole la courbe pour voir la valeur à chaque date.';
+  // Avant le début de l'historique des prix, la valeur est estimée (pointillés).
+  let est = -1; for (const it of state.items) if (!it.sold && IMP[it.ref] && di(it.buyDate) < IMP[it.ref][0][0]) est = Math.max(est, IMP[it.ref][0][0]);
+  const from = periodFrom(ui.period);
+  const estOn = est > from;
+  const histNote = estOn ? `Pointillés : estimation entre tes prix d’achat et les premiers prix Cardmarket connus (historique réel depuis le ${dfr(est)}).` : 'Survole la courbe pour voir la valeur à chaque date.';
   const t = totalsFor(ui.filter, from), all = totals();
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
   const vs = t.vs;
   CH.main = {
     h: 300, noTip: true, aria: 'Évolution de la valeur de la collection',
-    series: [{ label: 'Valeur', color: 'var(--accent)', pts: vs.val, area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }],
-    onHover: (d, [v, i]) => { if (v == null) return; $('#hero-v').textContent = eur(v); $('#hero-g').innerHTML = gainChip(v - i, i ? v / i - 1 : null); $('#hero-i').textContent = `pour ${eur(i, false)} investis`; $('#hero-d').textContent = dfr(d); },
+    series: estOn
+      ? [{ label: 'Estimation', color: 'var(--accent)', pts: vs.val.filter(p => p.d <= est), dot: true }, { label: 'Valeur', color: 'var(--accent)', pts: vs.val.filter(p => p.d >= est), area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }]
+      : [{ label: 'Valeur', color: 'var(--accent)', pts: vs.val, area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }],
+    onHover: (d, o) => { const v = o['Valeur'] ?? o['Estimation'], i = o['Investi']; if (v == null) return; $('#hero-v').textContent = eur(v); $('#hero-g').innerHTML = gainChip(v - i, i ? v / i - 1 : null); $('#hero-i').textContent = `pour ${eur(i, false)} investis`; $('#hero-d').textContent = dfr(d) + (estOn && d < est ? ' (estimation)' : ''); },
     onLeave: () => { $('#hero-v').textContent = eur(t.v); $('#hero-g').innerHTML = gainChip(t.g, t.gp); $('#hero-i').textContent = `pour ${eur(t.i, false)} investis`; $('#hero-d').textContent = 'Aujourd’hui'; },
   };
   const rows = state.items.filter(isHeld).map(rowData).filter(r => r.pvp != null).sort((a, b) => b.pvp - a.pvp);
@@ -1434,7 +1441,7 @@ VIEWS.total = function () {
       <div class="hero-ctrl">${chips('filter', ui.filter, [['all', 'Tout'], ['sealed', 'Scellé'], ['card', 'Cartes']], 'Filtrer')}${chips('period', ui.period, PERIODS, 'Période')}</div>
     </div>
     <div class="chart" data-chart="main" style="height:300px" role="img" aria-label="Évolution de la valeur de la collection"></div>
-    <div class="legend"><span><i style="background:var(--accent)"></i>Valeur de marché</span><span><i class="dash"></i>Montant investi</span><span>${esc(histNote)}</span></div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Valeur de marché</span><span><i class="dash"></i>Montant investi</span></div><p class="muted small" style="margin-top:6px">${esc(histNote)}</p>
   </section>
   <dl class="stats">
     <div class="stat"><dt>Plus-value latente</dt><dd class="${cls(all.pv)}">${eurS(all.pv, false)}<small>${pct(all.pvp)}</small></dd></div>
