@@ -213,30 +213,41 @@ console.log(`Scellé : ${sealed.length} produits avec un prix.`);
 if (!PRODUCT_URLS.length) console.log('Astuce : ajoute la variable CM_PRODUCTS_URLS pour inclure le scellé.');
 
 /* ---------- 3b. Photos du scellé : catalogue TCGplayer via TCGCSV (rafraîchi chaque semaine) ---------- */
-const IMG_CACHE = `${DIR}/tcg-sealed.json`;
+const IMG_CACHE = `${DIR}/tcg.json`;
 const readJSON = (f, def) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return def; } };
 let tcg = readJSON(IMG_CACHE, null);
-if (!tcg || !Array.isArray(tcg.rows) || Date.now() - (tcg.at || 0) > 6.5 * 864e5) {
+async function tcgCategory(catId) {
+  const groups = (await getJSON(`https://tcgcsv.com/tcgplayer/${catId}/groups`)).results || [];
+  const sealedRows = [], cardRows = []; let gi = 0;
+  const worker = async () => {
+    while (gi < groups.length) {
+      const g = groups[gi++];
+      try {
+        const j = await getJSON(`https://tcgcsv.com/tcgplayer/${catId}/${g.groupId}/products`);
+        for (const p of j.results || []) {
+          const num = ((p.extendedData || []).find(e => e.name === 'Number') || {}).value;
+          if (num) cardRows.push([p.productId, g.name, g.abbreviation || '', String(num)]);
+          else if (!/code card/i.test(p.name)) sealedRows.push([p.productId, p.name, g.name]);
+        }
+      } catch (e) { /* groupe ignoré */ }
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  return { sealedRows, cardRows };
+}
+if (!tcg || !Array.isArray(tcg.rows) || !Array.isArray(tcg.cards) || Date.now() - (tcg.at || 0) > 6.5 * 864e5) {
   try {
-    const groups = (await getJSON('https://tcgcsv.com/tcgplayer/3/groups')).results || [];
-    const rows = []; let gi = 0;
-    const worker = async () => {
-      while (gi < groups.length) {
-        const g = groups[gi++];
-        try {
-          const j = await getJSON(`https://tcgcsv.com/tcgplayer/3/${g.groupId}/products`);
-          for (const p of j.results || []) {
-            if ((p.extendedData || []).some(e => e.name === 'Number')) continue;      // une carte, pas un produit scellé
-            if (/code card/i.test(p.name)) continue;
-            rows.push([p.productId, p.name, g.name]);
-          }
-        } catch (e) { /* groupe ignoré */ }
-      }
-    };
-    await Promise.all(Array.from({ length: 6 }, worker));
-    if (rows.length) { tcg = { at: Date.now(), rows }; write(IMG_CACHE, tcg); }
-    console.log(`Photos : catalogue TCGplayer rafraîchi (${rows.length} produits scellés).`);
+    const en = await tcgCategory(3);
+    let jp = { cardRows: [] };
+    try {
+      const cats = (await getJSON('https://tcgcsv.com/tcgplayer/categories')).results || [];
+      const jc = cats.find(c => /pok[eé]mon japan/i.test(`${c.name} ${c.displayName}`));
+      if (jc) jp = await tcgCategory(jc.categoryId);
+    } catch (e) { console.log('Photos : catalogue japonais TCGplayer indisponible (' + e.message + ').'); }
+    if (en.sealedRows.length) { tcg = { at: Date.now(), rows: en.sealedRows, cards: en.cardRows, jp: jp.cardRows }; write(IMG_CACHE, tcg); }
+    console.log(`Photos : catalogue TCGplayer rafraîchi (${en.sealedRows.length} scellés, ${en.cardRows.length} cartes, ${jp.cardRows.length} cartes japonaises).`);
   } catch (e) { console.log('Photos : catalogue TCGplayer indisponible pour l’instant (' + e.message + ').'); }
+  if (fs.existsSync(`${DIR}/tcg-sealed.json`)) fs.unlinkSync(`${DIR}/tcg-sealed.json`);
 }
 if (tcg && tcg.rows) {
   const nrm = x => String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -310,6 +321,43 @@ if (tcg && tcg.rows) {
 }
 for (const row of cards) row[10] = '';
 
+/* ---------- 3b'. Photos de secours des cartes : même extension, même numéro chez TCGplayer ---------- */
+if (tcg && Array.isArray(tcg.cards)) {
+  const nrm2 = x => String(x).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\bpokemon\b/g, ' ').replace(/&/g, ' and ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const grp2 = x => nrm2(String(x).replace(/^[A-Za-z]{1,4}\d*\s*[:\-–]\s*/, ''));
+  const numKey = x => String(x).split('/')[0].trim().toUpperCase().replace(/^0+(?=\d)/, '');
+  const byGroup = new Map();
+  for (const [pid, g, , num] of tcg.cards) { const k = grp2(g); if (!byGroup.has(k)) byGroup.set(k, new Map()); const m = byGroup.get(k); const nk = numKey(num); if (!m.has(nk)) m.set(nk, pid); }
+  const keys = [...byGroup.keys()];
+  const setCache = new Map();
+  const forSet = setEn => {
+    if (setCache.has(setEn)) return setCache.get(setEn);
+    // le groupe exact d'abord, puis ses sous-séries (« … Trainer Gallery », « … Base Set »), puis « Scarlet & Violet 151 » pour « 151 »
+    const sub = /^(base set|trainer gallery|galarian gallery|shiny vault|radiant collection|classic collection)$/;
+    const rank = k => k === setEn ? 0 : k.startsWith(setEn + ' ') && sub.test(k.slice(setEn.length + 1)) ? 1 : k.endsWith(' ' + setEn) ? 2 : 9;
+    const maps = keys.filter(k => rank(k) < 9).sort((a, b) => rank(a) - rank(b)).map(k => byGroup.get(k));
+    setCache.set(setEn, maps); return maps;
+  };
+  const jpRows = Array.isArray(tcg.jp) ? tcg.jp : [];
+  const jpCache = new Map();
+  const forJp = sid => {
+    if (jpCache.has(sid)) return jpCache.get(sid);
+    const re = new RegExp('(^|[^a-z0-9])' + sid.replace(/[-.]/g, '\\$&') + '([^a-z0-9]|$)', 'i');
+    const m = new Map();
+    for (const [pid, g, ab, num] of jpRows) if (ab.toLowerCase() === sid.toLowerCase() || re.test(g)) { const nk = numKey(num); if (!m.has(nk)) m.set(nk, pid); }
+    jpCache.set(sid, m); return m;
+  };
+  let eu = 0, jpn = 0;
+  for (const r of cards) {
+    const nk = numKey(String(r[5]).replace(/ \(v\d+\)$/, ''));
+    let pid = null;
+    if (r[8] === 'JP') { const sid = String(r[4]).replace(/^jp-/, ''); pid = forJp(sid).get(nk) || null; if (pid) jpn++; }
+    else if (SETS[r[4]]) { for (const m of forSet(nrm2(SETS[r[4]][1]))) { if (m.has(nk)) { pid = m.get(nk); break; } } if (pid) eu++; }
+    r[12] = pid || '';
+  }
+  console.log(`Photos de secours des cartes : ${eu} cartes internationales et ${jpn} cartes japonaises.`);
+}
+
 /* ---------- 3c. Doublons : un seul produit visible par nom ---------- */
 // Les doublons restent dans le fichier (pour les objets déjà dans une collection) mais sont masqués du catalogue.
 {
@@ -329,7 +377,7 @@ for (const row of cards) row[10] = '';
 /* ---------- 4. Fichiers pour l'appli ---------- */
 const products = [...sealed, ...cards];
 const used = new Set(products.map(p => p[0]));
-write(`${DIR}/products.json`, { createdAt: created, fields: ['cm', 'k', 'name', 'en', 'set', 'num', 'rarity', 'type', 'lang', 'img', 'pimg', 'hid'], sets: SETS, rows: products });
+write(`${DIR}/products.json`, { createdAt: created, fields: ['cm', 'k', 'name', 'en', 'set', 'num', 'rarity', 'type', 'lang', 'img', 'pimg', 'hid', 'tid'], sets: SETS, rows: products });
 const F = ['idProduct', 'trend', 'avg1', 'avg7', 'avg30', 'low', 'trend-holo', 'avg7-holo', 'avg30-holo'];
 write(`${DIR}/latest.json`, { createdAt: created, fields: F, rows: [...price].filter(([id]) => used.has(id)).map(([id, r]) => [id, ...r]) });
 // Relevé du jour, compact : [identifiant, tendance, moyenne 7 j, moyenne 30 j, prix bas]
