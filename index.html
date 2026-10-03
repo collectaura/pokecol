@@ -197,6 +197,7 @@ label.f{display:flex;flex-direction:column;gap:6px;font-size:.87rem;color:var(--
 
 /* Images et photos */
 img.pic{display:block;object-fit:cover;border-radius:10px;background:var(--surface-2)}
+img.pic.box{object-fit:contain;background:#fff;padding:4px;border-radius:10px}
 img.pic.card{object-fit:contain;background:none;border-radius:5px;filter:drop-shadow(0 4px 8px rgba(0,0,0,.3))}
 .photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:10px}
 .ph{position:relative;aspect-ratio:1;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface);padding:0;cursor:pointer}
@@ -945,7 +946,7 @@ function registerProducts(j) {
   }
   EXTRA = j.rows.map(r => {
     const set = r[fi.set] ? 't:' + r[fi.set] : '';
-    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '' };
+    return { id: 'cm' + r[fi.cm], cm: r[fi.cm], kind: r[fi.k] === 's' ? 'sealed' : 'card', name: r[fi.name], en: r[fi.en] || '', set, setName: set ? '' : 'Autres produits', number: r[fi.num] || '', rarity: r[fi.rarity] || '', type: r[fi.type], lang: r[fi.lang], release: SETS[set]?.date || '', auto: true, img: fi.img != null && r[fi.img] ? r[fi.img] : '', pimg: fi.pimg != null && r[fi.pimg] ? r[fi.pimg] : '' };
   });
   CMF.catalog = EXTRA.map(p => ({ id: p.cm, name: prodName(p) + (p.en ? ' · ' + p.en : ''), cat: TYPES[p.type] || '', exp: setName(p), t: toks(`${p.name} ${p.en} ${SETS[p.set]?.en || ''} ${setName(p)} ${p.number}`) }));
   CMF.catalogCount = EXTRA.length;
@@ -1155,6 +1156,7 @@ function colorsFor(p) {
 function thumb(p, size = 56, itemId) {
   const cover = typeof PH !== 'undefined' && p && ((itemId && PH.covers[itemId]) || PH.covers['p:' + p.id]);
   if (cover) return `<img class="pic" src="${cover}" width="${size}" height="${size}" style="width:${size}px;height:${size}px" alt="">`;
+  if (p && p.pimg) return `<img class="pic box" src="https://tcgplayer-cdn.tcgplayer.com/product/${encodeURIComponent(p.pimg)}_200w.jpg" data-ref="${esc(p.id)}" data-size="${size}" style="width:${size}px;height:${size}px" loading="lazy" alt="${esc(prodName(p))}">`;
   const u = typeof tcgImg === 'function' ? tcgImg(p) : null;
   if (u) return `<img class="pic card" src="${u}" data-alt="${u.replace('/fr/', '/en/')}" data-ref="${esc(p.id)}" data-size="${size}" style="height:${size}px;width:${Math.round(size * .727)}px" loading="lazy" alt="${esc(prodName(p))}">`;
   return thumbSvg(p, size);
