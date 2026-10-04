@@ -410,14 +410,21 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
   if (!z) { try { execSync('sudo apt-get update -qq && (sudo apt-get install -y -qq 7zip || sudo apt-get install -y -qq p7zip-full)', { stdio: 'ignore' }); } catch { /* échec d'installation */ } z = find7z(); }
   const have7z = !!z;
   if (!have7z) console.log('Historique long : outil 7-Zip introuvable, historique reporté au prochain passage.');
-  let processed = 0, changed = false;
+  let processed = 0, changed = false, fails = 0;
+  console.log(`Historique long : ${targets.size} produits à suivre, ${todo.length} archives à récupérer.`);
   if (have7z && targets.size && todo.length) {
     for (const d of todo) {
       if (Date.now() - T0 > BUDGET) break;
       const arc = '/tmp/pv-prices.7z', out = '/tmp/pv-prices';
       try {
         const res = await fetch(`${process.env.ARCHIVE_BASE || 'https://tcgcsv.com/archive/tcgplayer'}/prices-${d}.ppmd.7z`, { headers: { 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' } });
-        if (!res.ok) { if (res.status === 404 && d !== refDate) meta.done.push(d); continue; }   // jour absent de l'archive : on passe
+        if (!res.ok) {
+          fails++;
+          if (fails <= 3) console.log(`Historique long : archive du ${d} refusée (code ${res.status} ${res.statusText}) — ${res.url}`);
+          if (fails >= 5 && processed === 0) { console.log('Historique long : le site des archives refuse les téléchargements, nouvel essai au prochain passage.'); break; }
+          continue;
+        }
+        fails = 0;
         fs.writeFileSync(arc, Buffer.from(await res.arrayBuffer()));
         fs.rmSync(out, { recursive: true, force: true });
         execSync(`${z} x -y -bd -o${out} ${arc}`, { stdio: 'ignore' });
@@ -454,6 +461,6 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
     meta.n = meta.done.length; meta.products = n; meta.at = new Date().toISOString();
     write(`${LH}/meta.json`, meta);
     console.log(`Historique long : ${processed} semaines ajoutées (${meta.done.length}/${want.length} au total), ${n} produits scellés avec un historique depuis 2024.`);
-  } else console.log(`Historique long : complet (${meta.done.length}/${want.length} semaines).`);
+  } else console.log(meta.done.length >= want.length ? `Historique long : complet (${want.length}/${want.length} semaines).` : `Historique long : rien de nouveau ce passage (${meta.done.length}/${want.length} semaines).`);
 }
 console.log(`Catalogue de l'appli : ${products.length} produits. Relevés conservés : ${Math.min(days.length, KEEP_DAYS)} jours.`);
