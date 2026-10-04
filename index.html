@@ -555,16 +555,19 @@ CATALOG.forEach(genSeries);
 
 let PROD = {};      // id -> produit (catalogue + produits ajoutés)
 let IMP = {};       // id -> [[jour, prix]] trié
+let CMSTART = {};   // id -> premier jour de vrai prix Cardmarket (avant : historique américain recalé)
 let EXTRA = [];     // catalogue Cardmarket fourni par le robot (version automatique)
 function rebuild() {
   PROD = {};
   CATALOG.forEach(p => PROD[p.id] = p);
   EXTRA.forEach(p => PROD[p.id] = p);
   state.custom.forEach(p => PROD[p.id] = Object.assign({ custom: true }, p));
-  IMP = {};
+  IMP = {}; CMSTART = {};
   for (const [ref, pts] of Object.entries(state.imported)) {
     const arr = pts.map(([d, p, src, n]) => [di(d), +p, src || '', n || 0]).filter(([d, p]) => !isNaN(d) && d <= T && isFinite(p)).map(([d, p, src, n]) => [Math.max(0, d), p, src, n]).sort((a, b) => a[0] - b[0]);
     if (arr.length) IMP[ref] = arr;
+    const fc = arr.find(x => x[2] !== 'us');
+    if (fc && arr[0][2] === 'us') CMSTART[ref] = fc[0];
   }
 }
 const P = id => PROD[id];
@@ -612,6 +615,19 @@ function mult(it, p) {
 function unitAt(it, d) {
   if (it.manual && d >= clampDay(di(it.manual.date))) return it.manual.price;
   const base = marketAt(it.ref, d);
+  // Historique américain (avant le premier vrai prix Cardmarket) : on garde ses mouvements, mais on le recale
+  // pour qu'il parte de ton prix d'achat le jour de l'achat et rejoigne le prix Cardmarket ensuite.
+  const cs = CMSTART[it.ref];
+  if (base != null && cs != null && d < cs) {
+    const b = clampDay(di(it.buyDate)), first = IMP[it.ref][0][0];
+    if (!isNaN(b) && b >= first && b < cs) {
+      const m = mult(it, P(it.ref)), atBuy = marketAt(it.ref, b) * m;
+      if (atBuy > 0) {
+        const kb = it.buyPrice / atBuy, w = Math.max(0, Math.min(1, (d - b) / (cs - b)));
+        return Math.round(base * m * (kb + (1 - kb) * w) * 100) / 100;
+      }
+    }
+  }
   if (base == null) {
     // Avant le premier prix connu : estimation linéaire entre le prix d'achat (le jour de l'achat)
     // et le premier prix de marché connu.
@@ -1494,7 +1510,7 @@ VIEWS.total = function () {
   const from = periodFrom(ui.period);
   const estOn = est > from;
   const usOn = state.items.some(it => !it.sold && (IMP[it.ref] || []).some(x => x[2] === 'us' && x[0] < T));
-  const usNote = usOn ? ' La partie ancienne de la courbe suit l’évolution du marché TCGplayer (États-Unis), ramenée au prix Cardmarket.' : '';
+  const usNote = usOn ? ' Avant septembre 2026, la courbe suit les mouvements du marché TCGplayer (États-Unis), recalés sur tes prix d’achat et sur les prix Cardmarket actuels.' : '';
   const histNote = (estOn ? `Pointillés : estimation entre tes prix d’achat et les premiers prix connus (historique depuis le ${dfr(est)}).` : 'Survole la courbe pour voir la valeur à chaque date.') + usNote;
   const t = totalsFor(ui.filter, from), all = totals();
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
