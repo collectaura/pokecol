@@ -513,7 +513,7 @@ const CATALOG = [
 ];
 
 /* ============ État persistant ============ */
-const DEFAULT_STATE = () => ({ v: 1, items: [], wishlist: [], alerts: [], imported: {}, custom: [], ebayQ: {}, cm: { links: {}, last: {}, field: 'trend', done: {}, lastDay: '', mirror: {} }, settings: { theme: 'dark', demo: false } });
+const DEFAULT_STATE = () => ({ v: 1, items: [], wishlist: [], alerts: [], imported: {}, custom: [], ebayQ: {}, cm: { links: {}, last: {}, field: 'trend', done: {}, lastDay: '', mirror: {} }, settings: { theme: 'dark', demo: false, usHist: false } });
 let state = DEFAULT_STATE();
 function normalize(s) {
   const d = DEFAULT_STATE();
@@ -564,7 +564,7 @@ function rebuild() {
   state.custom.forEach(p => PROD[p.id] = Object.assign({ custom: true }, p));
   IMP = {}; CMSTART = {};
   for (const [ref, pts] of Object.entries(state.imported)) {
-    const arr = pts.map(([d, p, src, n]) => [di(d), +p, src || '', n || 0]).filter(([d, p]) => !isNaN(d) && d <= T && isFinite(p)).map(([d, p, src, n]) => [Math.max(0, d), p, src, n]).sort((a, b) => a[0] - b[0]);
+    const arr = pts.filter(x => state.settings.usHist || x[2] !== 'us').map(([d, p, src, n]) => [di(d), +p, src || '', n || 0]).filter(([d, p]) => !isNaN(d) && d <= T && isFinite(p)).map(([d, p, src, n]) => [Math.max(0, d), p, src, n]).sort((a, b) => a[0] - b[0]);
     if (arr.length) IMP[ref] = arr;
     const fc = arr.find(x => x[2] !== 'us');
     if (fc && arr[0][2] === 'us') CMSTART[ref] = fc[0];
@@ -1027,7 +1027,7 @@ const PREVUS = {};
 async function previewProduct(ref) {
   const p = P(ref); if (!p || !p.cm || IMP[ref] || PREV[ref]) return false;
   PREV[ref] = [];
-  const [s, l] = await Promise.all([mirrorSeries(p.cm), p.kind === 'sealed' ? longSeries(p.cm) : cardLong(p)]);
+  const [s, l] = await Promise.all([mirrorSeries(p.cm), !state.settings.usHist ? [] : p.kind === 'sealed' ? longSeries(p.cm) : cardLong(p)]);
   const first = s.length ? s.map(x => x[0]).sort()[0] : '9999';
   const older = l.filter(([d]) => d < first);
   if (older.length) PREVUS[ref] = true;
@@ -1068,7 +1068,7 @@ async function autoLoad(silent) {
     fresh.forEach(ref => state.cm.done[ref] = 1);
     // Historique long du scellé depuis 2024 (repris à chaque nouvelle version des fichiers du robot).
     state.cm.long ||= {};
-    for (const ref of tracked) {
+    for (const ref of state.settings.usHist ? tracked : []) {
       const p = P(ref); if (!p) continue;
       let l, ver;
       if (p.kind === 'sealed') { l = await longSeries(cmIdOf(ref)); if (!longMeta || !longMeta.n) continue; ver = longMeta.n; }
@@ -1721,6 +1721,7 @@ VIEWS.prices = function () {
   <textarea id="imp-coll" placeholder="Colle ici un CSV exporté depuis PokéCol" aria-label="Collection à importer"></textarea>
   <div class="toolbar" style="margin-top:10px"><button class="btn" data-act="impcoll">Importer la collection</button><label class="btn ghost">Choisir un fichier CSV<input type="file" accept=".csv,.txt,text/csv" data-file="imp-coll" class="sr"></label></div></section>
   <section class="section"><h2>Réglages</h2><ul class="list">
+    ${AUTO.on ? `<li><div class="grow"><b>Historique ancien (marché américain)</b><span class="muted small">Prolonge les courbes avant septembre 2026 avec l’évolution des prix TCGplayer, convertie en euros. Désactivé, seuls les prix du marché français (Cardmarket) sont utilisés.</span></div><button class="btn sm" data-act="toggleus">${state.settings.usHist ? 'Désactiver' : 'Activer'}</button></li>` : ''}
     <li><div class="grow"><b>Prix de démonstration</b><span class="muted small">Prix fictifs pour tester l’appli. Désactivés, seules les vraies cotes apparaissent.</span></div><button class="btn sm" data-act="toggledemo">${state.settings.demo ? 'Désactiver' : 'Activer'}</button></li>
     <li><div class="grow"><b>Stockage</b><span class="muted small">${Store.mode === 'cloud' ? 'Ta collection est enregistrée sur ton compte et reste privée.' : 'Ta collection est enregistrée dans ce navigateur.'}</span></div>${state.items.length ? '' : '<button class="btn sm" data-act="demo">Collection d’exemple</button>'}<button class="btn sm danger" data-act="reset">Tout effacer</button></li>
   </ul></section>`;
@@ -2243,6 +2244,7 @@ const ACT = {
     if (!state.cm.links[ref]) state.cm.links[ref] = { id: null, name: 'Page Cardmarket copiée', holo: false };
     cmApply(ref, row, todayStr()); EB_CM = null; closeModal(); modalCtx = null; commit('Prix Cardmarket enregistré'); openProduct(ref);
   },
+  toggleus: () => { state.settings.usHist = !state.settings.usHist; state.cm.long = {}; PREV = {}; for (const k of Object.keys(PREVUS)) delete PREVUS[k]; commit(state.settings.usHist ? 'Historique américain activé' : 'Courbes basées uniquement sur le marché français'); if (state.settings.usHist) autoLoad(true); },
   toggledemo: () => { state.settings.demo = !state.settings.demo; commit(state.settings.demo ? 'Prix de démonstration activés' : 'Seules tes vraies cotes sont affichées'); },
   ebDays: (d, el) => { EB.days = +d.v; $$('[data-act="ebDays"]').forEach(b => b.setAttribute('aria-pressed', b === el)); renderEbay(); },
   ebsave: d => {
