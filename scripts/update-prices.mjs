@@ -501,8 +501,9 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
   // Accès groupé : l'historique complet de 50 produits par demande. Les numéros sont ceux de TCGplayer.
   meta.tm ||= { done: [], at: null };
   const TM = process.env.TICKERMINT_BASE || 'https://api.tickermint.cards';
-  const tmTodo = [...targets.keys()].filter(pid => !meta.tm.done.includes(pid) && !(raw[pid] && raw[pid].length > 20));
-  const tmRefresh = !meta.tm.at || Date.now() - Date.parse(meta.tm.at) > 7 * 864e5;
+  const tmRefresh = meta.tm.at && Date.now() - Date.parse(meta.tm.at) > 7 * 864e5;
+  if (tmRefresh) { meta.tm.done = []; meta.tm.at = null; }                // nouvelle tournée hebdomadaire
+  const tmTodo = [...targets.keys()].filter(pid => !meta.tm.done.includes(pid));
   const pickPts = obj => {
     // Lit une série de prix quelle que soit sa forme : [[date, prix]] ou [{ date, market }], éventuellement par impression.
     const out = [];
@@ -537,29 +538,45 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
   };
   if ((tmTodo.length || tmRefresh) && targets.size) {
     const ids = tmTodo.length ? tmTodo : [...targets.keys()];
-    let got = 0, calls = 0, logged = false;
-    for (let i = 0; i < ids.length && Date.now() - T0 < BUDGET; i += 50) {
-      const batch = ids.slice(i, i + 50);
-      let j = null;
-      const tries = [
-        () => fetch(`${TM}/v1/bulk/history?game=pokemon&ids=${batch.join(',')}`, { headers: { 'Accept': 'application/json', 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' } }),
-        () => fetch(`${TM}/v1/bulk/history`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' }, body: JSON.stringify({ game: 'pokemon', product_ids: batch, ids: batch }) }),
-      ];
-      for (const t of tries) {
-        try { const r = await t(); calls++; if (r.ok) { j = await r.json(); break; } if (!logged) { console.log(`Historique long (TickerMint) : réponse ${r.status} ${r.statusText}.`); logged = true; } } catch (e) { if (!logged) { console.log('Historique long (TickerMint) : ' + e.message); logged = true; } }
-      }
-      if (!j) { if (i === 0) break; continue; }
+    const H = { 'Accept': 'application/json', 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' };
+    let got = 0, calls = 0, miss = 0, errs = 0, shown = 0;
+    const take = (pid, j) => {
       const ser = findSeries(j);
-      if (i === 0) console.log(`Historique long (TickerMint) : première réponse lue, ${Object.keys(ser).length} produits trouvés. Extrait : ${JSON.stringify(j).slice(0, 300)}`);
-      for (const pid of batch) {
-        const pts = ser[pid];
-        if (pts && pts.length) { const old = pts.filter(p => p[0] < '2026-09-16'); if (old.length) { raw[pid] = old; got++; changed = true; } }
-        meta.tm.done.push(pid);
-      }
-      await new Promise(r => setTimeout(r, 1200));                       // politesse : environ une demande par seconde
+      const pts = ser[pid] || Object.values(ser)[0] || [];
+      const old = pts.filter(p => p[0] < '2026-09-16');
+      if (old.length) { raw[pid] = old; got++; changed = true; return true; }
+      return false;
+    };
+    // 1) Accès groupé (50 produits par demande) ; 2) sinon, produit par produit (accès libre, sans clé).
+    let mode = meta.tm.mode || 'bulk';
+    if (mode === 'bulk') {
+      try {
+        const r = await fetch(`${TM}/v1/bulk/history?game=pokemon&ids=${ids.slice(0, 50).join(',')}`, { headers: H }); calls++;
+        if (r.ok) { const j = await r.json(); ids.slice(0, 50).forEach(pid => { if (take(pid, j)) meta.tm.done.push(pid); }); }
+        else { console.log(`Historique long (TickerMint) : accès groupé refusé (${r.status}), passage au produit par produit.`); mode = 'single'; }
+      } catch (e) { mode = 'single'; }
+      meta.tm.mode = mode;
     }
-    meta.tm.at = new Date().toISOString();
-    console.log(`Historique long (TickerMint) : ${got} produits avec un historique récupéré (${calls} demandes).`);
+    if (mode === 'single') {
+      for (const pid of ids) {
+        if (Date.now() - T0 > BUDGET) break;
+        if (meta.tm.done.includes(pid)) continue;
+        try {
+          const r = await fetch(`${TM}/products/${pid}/prices?game=pokemon`, { headers: H }); calls++;
+          if (r.status === 429) { console.log('Historique long (TickerMint) : trop de demandes, pause.'); await new Promise(x => setTimeout(x, 30000)); continue; }
+          if (r.status === 404) { miss++; meta.tm.done.push(pid); continue; }
+          if (!r.ok) { errs++; if (shown++ < 2) console.log(`Historique long (TickerMint) : produit ${pid}, réponse ${r.status} ${r.statusText}.`); if (errs >= 8 && got === 0) { console.log('Historique long (TickerMint) : accès refusé, nouvel essai au prochain passage.'); break; } continue; }
+          const j = await r.json();
+          if (calls <= 2) console.log(`Historique long (TickerMint) : extrait de réponse ${JSON.stringify(j).slice(0, 300)}`);
+          if (!take(pid, j)) miss++;
+          meta.tm.done.push(pid);
+        } catch (e) { errs++; if (shown++ < 2) console.log('Historique long (TickerMint) : ' + e.message); }
+        await new Promise(x => setTimeout(x, +(process.env.TM_DELAY ?? 700)));                      // politesse : un peu plus d'une demande par seconde
+      }
+    }
+    if (!ids.some(pid => !meta.tm.done.includes(pid))) meta.tm.at = new Date().toISOString();
+    const left = [...targets.keys()].filter(pid => !meta.tm.done.includes(pid)).length;
+    console.log(`Historique long (TickerMint) : ${got} produits récupérés ce passage, ${miss} sans historique, ${left} restants (${calls} demandes).`);
   }
   if (changed || !fs.existsSync(`${LH}/tcg-0.json`)) {
     // Mise à l'échelle : prix Cardmarket du jour / prix TCGplayer de référence, appliqué à toute la courbe américaine.
@@ -578,6 +595,7 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
     meta.n = (meta.n || 0) + 1; meta.products = n; meta.at = new Date().toISOString();
     write(`${LH}/meta.json`, meta);
     console.log(`Historique long : ${n} produits scellés avec un historique depuis 2024 (archive TCGCSV : ${meta.done.length}/${want.length} semaines).`);
-  } else console.log(meta.done.length >= want.length ? `Historique long : complet (${want.length}/${want.length} semaines).` : `Historique long : rien de nouveau ce passage (${meta.done.length}/${want.length} semaines).`);
+  } else console.log(meta.done.length >= want.length ? `Historique long : complet (${want.length}/${want.length} semaines).` : `Historique long : rien de nouveau ce passage.`);
+  write(`${LH}/meta.json`, meta);                                          // progression gardée d'un passage à l'autre
 }
 console.log(`Catalogue de l'appli : ${products.length} produits. Relevés conservés : ${Math.min(days.length, KEEP_DAYS)} jours.`);
