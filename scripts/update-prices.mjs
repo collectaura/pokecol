@@ -410,6 +410,31 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
   if (!z) { try { execSync('sudo apt-get update -qq && (sudo apt-get install -y -qq 7zip || sudo apt-get install -y -qq p7zip-full)', { stdio: 'ignore' }); } catch { /* échec d'installation */ } z = find7z(); }
   const have7z = !!z;
   if (!have7z) console.log('Historique long : outil 7-Zip introuvable, historique reporté au prochain passage.');
+  // Le site peut refuser les robots : on essaie plusieurs façons de demander le fichier, comme un navigateur.
+  const BROWSER = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36';
+  let method = null;
+  async function getArchive(url, dest) {
+    const tries = [
+      ['navigateur', () => fetch(url, { headers: { 'User-Agent': BROWSER, 'Accept': '*/*', 'Referer': 'https://tcgcsv.com/', 'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8' } })],
+      ['simple', () => fetch(url)],
+      ['curl', async () => { try { execSync(`curl -sSfL --retry 2 -A "${BROWSER}" -e "https://tcgcsv.com/" -o ${dest} "${url}"`, { stdio: 'ignore' }); return { ok: true, status: 200, curl: true }; } catch { return { ok: false, status: 403, statusText: 'curl', url }; } }],
+    ];
+    const order = method ? [tries.find(t => t[0] === method), ...tries.filter(t => t[0] !== method)] : tries;
+    let last = null; const codes = [];
+    for (const [name, fn] of order) {
+      let r; try { r = await fn(); } catch (e) { r = { ok: false, status: 0, statusText: e.message }; }
+      if (r.ok) {
+        if (!r.curl) fs.writeFileSync(dest, Buffer.from(await r.arrayBuffer()));
+        if (method !== name) { method = name; console.log(`Historique long : téléchargement réussi (méthode « ${name} »).`); }
+        return { ok: true };
+      }
+      if (!r.curl && r.status) codes.push(r.status);
+      last = { ok: false, status: r.status, statusText: r.statusText || '', url };
+    }
+    if (codes.includes(404)) return { ok: false, status: 404, statusText: 'Not Found', url };
+    if (codes.length) return { ok: false, status: codes[0], statusText: '', url };
+    return last;
+  }
   let processed = 0, changed = false, fails = 0;
   console.log(`Historique long : ${targets.size} produits à suivre, ${todo.length} archives à récupérer.`);
   if (have7z && targets.size && todo.length) {
@@ -417,7 +442,9 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
       if (Date.now() - T0 > BUDGET) break;
       const arc = '/tmp/pv-prices.7z', out = '/tmp/pv-prices';
       try {
-        const res = await fetch(`${process.env.ARCHIVE_BASE || 'https://tcgcsv.com/archive/tcgplayer'}/prices-${d}.ppmd.7z`, { headers: { 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' } });
+        const url = `${process.env.ARCHIVE_BASE || 'https://tcgcsv.com/archive/tcgplayer'}/prices-${d}.ppmd.7z`;
+        const res = await getArchive(url, arc);
+        if (!res.ok && res.status === 404) { if (d !== refDate) meta.done.push(d); continue; }   // jour absent de l'archive
         if (!res.ok) {
           fails++;
           if (fails <= 3) console.log(`Historique long : archive du ${d} refusée (code ${res.status} ${res.statusText}) — ${res.url}`);
@@ -425,7 +452,6 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
           continue;
         }
         fails = 0;
-        fs.writeFileSync(arc, Buffer.from(await res.arrayBuffer()));
         fs.rmSync(out, { recursive: true, force: true });
         execSync(`${z} x -y -bd -o${out} ${arc}`, { stdio: 'ignore' });
         const base = fs.readdirSync(out).map(x => path.join(out, x, '3')).find(p => fs.existsSync(p));
