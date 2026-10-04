@@ -142,6 +142,32 @@ if (fs.existsSync(ASIA)) {
 }
 console.log(`Cartes japonaises : ${jpCount} avec un prix Cardmarket.`);
 
+/* ---------- 2c. Historique des cartes depuis 2024 : projet public rarebox-price-history ---------- */
+// On repère seulement les fichiers disponibles (sans les télécharger) pour relier chaque extension au bon fichier.
+// L'appli ira chercher l'historique d'une carte directement dans ce projet, quand elle en a besoin.
+const rbFiles = new Set();
+try {
+  fs.rmSync('.rarebox', { recursive: true, force: true });
+  execSync('git clone -q --depth 1 --filter=blob:none --no-checkout https://github.com/novaoc/rarebox-price-history .rarebox', { stdio: 'ignore' });
+  const out = execSync('git -C .rarebox ls-tree -r --name-only HEAD data/pokemon data/pokemon-ja', { maxBuffer: 64 * 1024 * 1024 }).toString();
+  for (const f of out.split('\n')) { const m = f.match(/^data\/(pokemon(?:-ja)?)\/(.+)\.json$/); if (m) rbFiles.add(m[1] + '/' + m[2]); }
+} catch (e) { console.log('Historique des cartes : projet rarebox indisponible (' + e.message + ').'); }
+function rbKey(id) {
+  if (id.startsWith('jp-')) { const k = 'pokemon-ja/' + id.slice(3).toLowerCase(); return rbFiles.has(k) ? k : ''; }
+  const s = id.toLowerCase(), c = [];
+  const m = s.match(/^([a-z]+)0*(\d+)(?:\.(5))?(.*)$/);
+  if (m) { const [, p, n, half, rest] = m; if (half) c.push(`${p}${n}pt5${rest}`, `${p}${n}5${rest}`); else c.push(`${p}${n}${rest}`); }
+  c.push(s, s.replace('.', ''), s.replace('.5', 'pt5'));
+  if (s === 'swsh10.5') c.push('pgo');
+  for (const k of c) if (rbFiles.has('pokemon/' + k)) return 'pokemon/' + k;
+  return '';
+}
+{
+  let n = 0;
+  for (const [id, v] of Object.entries(SETS)) { v[5] = rbKey(id); if (v[5]) n++; }
+  console.log(`Historique des cartes : ${n} extensions reliées à l'historique depuis 2024.`);
+}
+
 /* ---------- 3. Produits scellés (catalogue Cardmarket) ---------- */
 const sealed = [];
 const typeOf = (cat, name) => {
@@ -471,12 +497,77 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
       finally { fs.rmSync(arc, { force: true }); fs.rmSync(out, { recursive: true, force: true }); }
     }
   }
+  // Source n°2 : TickerMint (historique quotidien TCGplayer depuis février 2024, gratuit avec un lien vers leur site).
+  // Accès groupé : l'historique complet de 50 produits par demande. Les numéros sont ceux de TCGplayer.
+  meta.tm ||= { done: [], at: null };
+  const TM = process.env.TICKERMINT_BASE || 'https://api.tickermint.cards';
+  const tmTodo = [...targets.keys()].filter(pid => !meta.tm.done.includes(pid) && !(raw[pid] && raw[pid].length > 20));
+  const tmRefresh = !meta.tm.at || Date.now() - Date.parse(meta.tm.at) > 7 * 864e5;
+  const pickPts = obj => {
+    // Lit une série de prix quelle que soit sa forme : [[date, prix]] ou [{ date, market }], éventuellement par impression.
+    const out = [];
+    const toPt = x => {
+      if (Array.isArray(x) && x.length >= 2) return [String(x[0]).slice(0, 10), +x[1]];
+      if (x && typeof x === 'object') {
+        const d = x.date || x.day || x.d || x.as_of || x.timestamp; const v = x.market ?? x.market_price ?? x.marketPrice ?? x.price ?? x.value ?? x.m ?? x.mid;
+        if (d && v != null) return [String(typeof d === 'number' && d < 1e6 ? new Date(d * 864e5).toISOString() : d).slice(0, 10), +v];
+      }
+      return null;
+    };
+    if (Array.isArray(obj)) { for (const x of obj) { const p = toPt(x); if (p && p[1] > 0 && /^\d{4}-\d{2}-\d{2}$/.test(p[0])) out.push(p); } }
+    return out;
+  };
+  const findSeries = (j) => {
+    // Renvoie { idProduit: [[date, prix], ...] } en parcourant la réponse.
+    const res = {};
+    const visit = (o, idHint) => {
+      if (!o || typeof o !== 'object') return;
+      if (Array.isArray(o)) { const pts = pickPts(o); if (pts.length && idHint != null) { (res[idHint] ||= []).push(...pts); return; } o.forEach(x => visit(x, idHint)); return; }
+      const id = o.product_id ?? o.productId ?? o.tcgplayer_id ?? o.tcgplayerId ?? o.id ?? idHint;
+      const printing = String(o.printing || o.subTypeName || o.variant || '');
+      if (printing && /reverse|1st/i.test(printing)) return;
+      for (const [k, v] of Object.entries(o)) {
+        if (/^\d+$/.test(k)) visit(v, +k);
+        else if (Array.isArray(v) || (v && typeof v === 'object')) visit(v, id);
+      }
+    };
+    visit(j, null);
+    for (const k of Object.keys(res)) { const m = new Map(res[k].map(p => [p[0], p[1]])); res[k] = [...m].sort((a, b) => a[0].localeCompare(b[0])); }
+    return res;
+  };
+  if ((tmTodo.length || tmRefresh) && targets.size) {
+    const ids = tmTodo.length ? tmTodo : [...targets.keys()];
+    let got = 0, calls = 0, logged = false;
+    for (let i = 0; i < ids.length && Date.now() - T0 < BUDGET; i += 50) {
+      const batch = ids.slice(i, i + 50);
+      let j = null;
+      const tries = [
+        () => fetch(`${TM}/v1/bulk/history?game=pokemon&ids=${batch.join(',')}`, { headers: { 'Accept': 'application/json', 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' } }),
+        () => fetch(`${TM}/v1/bulk/history`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' }, body: JSON.stringify({ game: 'pokemon', product_ids: batch, ids: batch }) }),
+      ];
+      for (const t of tries) {
+        try { const r = await t(); calls++; if (r.ok) { j = await r.json(); break; } if (!logged) { console.log(`Historique long (TickerMint) : réponse ${r.status} ${r.statusText}.`); logged = true; } } catch (e) { if (!logged) { console.log('Historique long (TickerMint) : ' + e.message); logged = true; } }
+      }
+      if (!j) { if (i === 0) break; continue; }
+      const ser = findSeries(j);
+      if (i === 0) console.log(`Historique long (TickerMint) : première réponse lue, ${Object.keys(ser).length} produits trouvés. Extrait : ${JSON.stringify(j).slice(0, 300)}`);
+      for (const pid of batch) {
+        const pts = ser[pid];
+        if (pts && pts.length) { const old = pts.filter(p => p[0] < '2026-09-16'); if (old.length) { raw[pid] = old; got++; changed = true; } }
+        meta.tm.done.push(pid);
+      }
+      await new Promise(r => setTimeout(r, 1200));                       // politesse : environ une demande par seconde
+    }
+    meta.tm.at = new Date().toISOString();
+    console.log(`Historique long (TickerMint) : ${got} produits avec un historique récupéré (${calls} demandes).`);
+  }
   if (changed || !fs.existsSync(`${LH}/tcg-0.json`)) {
     // Mise à l'échelle : prix Cardmarket du jour / prix TCGplayer de référence, appliqué à toute la courbe américaine.
     const shards = Array.from({ length: SH }, () => ({}));
     let n = 0;
     for (const [pid, cm] of targets) {
-      const pts = raw[pid]; const refUsd = meta.ref && meta.ref.prices[pid]; const cmNow = price.get(cm)?.[0];
+      const pts = raw[pid]; const cmNow = price.get(cm)?.[0];
+      const refUsd = (meta.ref && meta.ref.prices[pid]) || (pts && pts.length ? pts.sort((a, b) => a[0].localeCompare(b[0]))[pts.length - 1][1] : null);
       if (!pts || !pts.length || !(refUsd > 0) || !(cmNow > 0)) continue;
       const k = cmNow / refUsd; if (k < .2 || k > 5) continue;                       // correspondance douteuse : écartée
       shards[cm % SH][cm] = pts.sort((a, b) => a[0].localeCompare(b[0])).map(([d, v]) => [d, Math.round(v * k * 100) / 100]);
@@ -484,9 +575,9 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
     }
     shards.forEach((o, i) => write(`${LH}/tcg-${i}.json`, o));
     write(`${LH}/raw.json`, raw);
-    meta.n = meta.done.length; meta.products = n; meta.at = new Date().toISOString();
+    meta.n = (meta.n || 0) + 1; meta.products = n; meta.at = new Date().toISOString();
     write(`${LH}/meta.json`, meta);
-    console.log(`Historique long : ${processed} semaines ajoutées (${meta.done.length}/${want.length} au total), ${n} produits scellés avec un historique depuis 2024.`);
+    console.log(`Historique long : ${n} produits scellés avec un historique depuis 2024 (archive TCGCSV : ${meta.done.length}/${want.length} semaines).`);
   } else console.log(meta.done.length >= want.length ? `Historique long : complet (${want.length}/${want.length} semaines).` : `Historique long : rien de nouveau ce passage (${meta.done.length}/${want.length} semaines).`);
 }
 console.log(`Catalogue de l'appli : ${products.length} produits. Relevés conservés : ${Math.min(days.length, KEEP_DAYS)} jours.`);
