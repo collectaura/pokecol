@@ -500,6 +500,7 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
   // Source n°2 : TickerMint (historique quotidien TCGplayer depuis février 2024, gratuit avec un lien vers leur site).
   // Accès groupé : l'historique complet de 50 produits par demande. Les numéros sont ceux de TCGplayer.
   meta.tm ||= { done: [], at: null };
+  if (meta.tm.v !== 2) meta.tm = { done: [], at: null, v: 2, mode: meta.tm.mode };   // nouvelle lecture des réponses : on reprend tout
   const TM = process.env.TICKERMINT_BASE || 'https://api.tickermint.cards';
   const tmRefresh = meta.tm.at && Date.now() - Date.parse(meta.tm.at) > 7 * 864e5;
   if (tmRefresh) { meta.tm.done = []; meta.tm.at = null; }                // nouvelle tournée hebdomadaire
@@ -510,7 +511,7 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
     const toPt = x => {
       if (Array.isArray(x) && x.length >= 2) return [String(x[0]).slice(0, 10), +x[1]];
       if (x && typeof x === 'object') {
-        const d = x.date || x.day || x.d || x.as_of || x.timestamp; const v = x.market ?? x.market_price ?? x.marketPrice ?? x.price ?? x.value ?? x.m ?? x.mid;
+        const d = x.snapshot_date || x.date || x.day || x.d || x.as_of || x.timestamp; const v = x.market ?? x.market_price ?? x.marketPrice ?? x.price ?? x.value ?? x.m ?? x.mid;
         if (d && v != null) return [String(typeof d === 'number' && d < 1e6 ? new Date(d * 864e5).toISOString() : d).slice(0, 10), +v];
       }
       return null;
@@ -541,9 +542,17 @@ for (const old of ['catalog.json', 'history.json', 'tracked.json']) if (fs.exist
     const H = { 'Accept': 'application/json', 'User-Agent': 'PokeVault-Tracker (suivi de collection personnel)' };
     let got = 0, calls = 0, miss = 0, errs = 0, shown = 0;
     const take = (pid, j) => {
-      const ser = findSeries(j);
-      const pts = ser[pid] || Object.values(ser)[0] || [];
-      const old = pts.filter(p => p[0] < '2026-09-16');
+      // Réponse TickerMint : { "Normal": [ { snapshot_date, low, market }, … ], "Holofoil": [ … ] }
+      let pts = [];
+      if (j && typeof j === 'object' && !Array.isArray(j)) {
+        const keys = Object.keys(j).filter(k => Array.isArray(j[k]));
+        const key = keys.find(k => /^normal$/i.test(k)) || keys.find(k => !/reverse|1st/i.test(k)) || keys[0];
+        if (key) pts = pickPts(j[key]);
+      }
+      if (!pts.length) { const ser = findSeries(j); pts = ser[pid] || Object.values(ser)[0] || []; }
+      // Un point par semaine suffit pour l'historique ancien (plus léger), en gardant le dernier jour.
+      const daily = pts.filter(p => p[0] < '2026-09-16').sort((a, b) => a[0].localeCompare(b[0]));
+      const old = daily.filter((p, i) => i % 7 === 0 || i === daily.length - 1);
       if (old.length) { raw[pid] = old; got++; changed = true; return true; }
       return false;
     };
