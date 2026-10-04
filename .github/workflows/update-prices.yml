@@ -31,4 +31,11 @@ jobs:
           git config user.name "pokevault-robot"
           git config user.email "pokevault-robot@users.noreply.github.com"
           git add data
-          if git diff --cached --quiet; then echo "Rien de nouveau."; else git commit -m "Prix Cardmarket du $(date -u +%F)" && git push; fi
+          if git diff --cached --quiet; then echo "Rien de nouveau."; exit 0; fi
+          git commit -q -m "Prix Cardmarket du $(date -u +%F)"
+          # Le dépôt a pu changer pendant le travail du robot : on récupère ces changements puis on enregistre (3 essais).
+          for i in 1 2 3; do
+            git pull -q --rebase -X theirs origin main && git push -q && echo "Enregistré." && exit 0
+            echo "Nouvel essai d'enregistrement ($i)…"; sleep 5
+          done
+          exit 1
