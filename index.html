@@ -708,7 +708,7 @@ function marketVar(k) {
   return a ? b / a - 1 : null;
 }
 function periodFrom(per) {
-  const map = { '1M': 30, '3M': 91, '6M': 182, '1A': 365 };
+  const map = { '1S': 7, '1M': 30, '3M': 91, '6M': 182, '1A': 365 };
   if (map[per]) return T - map[per];
   let m = T;
   for (const it of state.items) m = Math.min(m, clampDay(di(it.buyDate)));
@@ -727,6 +727,17 @@ function valueSeries(from, filter) {
   const pv = [], pi = [];
   for (let i = 0; i < n; i++) { pv.push({ d: from + i, v: val[i] }); pi.push({ d: from + i, v: inv[i] }); }
   return { val: pv, inv: pi };
+}
+// Achats et ventes jour par jour sur une période (pour calculer le gain de la période).
+function flowSeries(from, filter, inclusive) {
+  const n = T - from + 1, buy = new Float64Array(n), sell = new Float64Array(n);
+  for (const it of state.items) {
+    if (!kindOk(it, filter)) continue;
+    const b = clampDay(di(it.buyDate));
+    if (!isNaN(b) && (b > from || inclusive)) buy[Math.min(n - 1, Math.max(0, b - from))] += it.buyPrice * it.qty;
+    if (it.sold) { const s = clampDay(di(it.sold.date)); if (!isNaN(s) && (s > from || (inclusive && s >= from))) sell[Math.min(n - 1, Math.max(0, s - from))] += it.sold.price * it.qty; }
+  }
+  return { buy, sell };
 }
 function rowData(it) {
   const p = P(it.ref);
@@ -1455,7 +1466,7 @@ const ui = {
 };
 const chips = (act, cur, opts, label) => `<div class="chips" role="group" aria-label="${esc(label)}">${opts.map(([v, l, n]) => `<button type="button" class="chip" data-act="${act}" data-v="${v}" aria-pressed="${v === cur}">${esc(l)}${n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>`;
 const seg = chips;
-const PERIODS = [['1M', '1M'], ['3M', '3M'], ['6M', '6M'], ['1A', '1A'], ['Tout', 'Tout']];
+const PERIODS = [['1S', '1S'], ['1M', '1M'], ['3M', '3M'], ['6M', '6M'], ['1A', '1A'], ['Tout', 'Tout']];
 const condLabel = (it, p) => p?.kind === 'card' ? (it.grade?.org ? `${it.grade.org} ${it.grade.note}` : COND_CARD[it.cond]?.l || '') : COND_SEALED[it.cond]?.l || '';
 const owned = ref => state.items.filter(it => it.ref === ref && !it.sold).reduce((a, it) => a + it.qty, 0);
 const RAR_FR = { 'common': 'Commune', 'uncommon': 'Peu commune', 'rare': 'Rare', 'rare holo': 'Rare holo', 'double rare': 'Double rare', 'illustration rare': 'Illustration rare', 'special illustration rare': 'Illustration spéciale rare', 'ultra rare': 'Ultra rare', 'hyper rare': 'Hyper rare', 'secret rare': 'Rare secrète', 'shiny rare': 'Rare chromatique', 'shiny ultra rare': 'Ultra rare chromatique', 'amazing rare': 'Rare magnifique', 'radiant rare': 'Rare radieuse', 'ace spec rare': 'ACE SPEC', 'mega hyper rare': 'Méga hyper rare', 'promo': 'Promo' };
@@ -1480,7 +1491,7 @@ function render() {
   const trig = alertsTriggered().length;
   $('#nav').innerHTML = NAV.map(([v, l, , i]) => `<button data-go="${v}"${ui.view === v ? ' aria-current="page"' : ''}>${i}<span>${esc(l)}</span>${v === 'watch' && trig ? `<span class="badge">${trig}</span>` : ''}</button>`).join('');
   $('#tabbar').innerHTML = NAV.map(([v, , s, i]) => `<button data-go="${v}"${ui.view === v ? ' aria-current="page"' : ''}>${i}<span>${esc(s)}</span></button>`).join('');
-  if (ui.view === 'total' && !ui.counted && state.items.length) { ui.counted = true; const t = totalsFor(ui.filter, periodFrom(ui.period)); countUp($('#hero-v'), t.v); }
+  if (ui.view === 'total' && !ui.counted && state.items.length) { ui.counted = true; const t = totalsFor(ui.filter, periodFrom(ui.period), ui.period === 'Tout'); countUp($('#hero-v'), t.v); }
 }
 function go(v) { ui.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); render(); scrollTo(0, 0); }
 const VIEWS = {};
@@ -1490,11 +1501,18 @@ function emptyState(title, text) {
   const p = { type: 'ETB', set: 'sv85', lang: 'FR', name: '' };
   return `<div class="empty"><svg class="art" viewBox="0 0 100 100" aria-hidden="true">${thumb(p, 140).replace(/^<svg[^>]*>|<\/svg>$/g, '')}</svg><h2>${title}</h2><p>${text}</p><div class="actions"><button class="btn primary" data-go="catalog">${ICON.plus}Ajouter un produit</button><button class="btn" data-act="demo">Voir une collection d’exemple</button></div></div>`;
 }
-function totalsFor(filter, from) {
-  const vs = valueSeries(from, filter);
-  const v = vs.val[vs.val.length - 1].v, i = vs.inv[vs.inv.length - 1].v;
-  return { vs, v, i, g: v - i, gp: i ? v / i - 1 : null };
+// Gain sur la période : évolution de la valeur, sans compter les achats comme des gains
+// ni les ventes comme des pertes. Sur « Tout » : bénéfice total (latent + ventes).
+function totalsFor(filter, from, total) {
+  const vs = valueSeries(from, filter), fl = flowSeries(from, filter, total);
+  const n = vs.val.length, v0 = total ? 0 : vs.val[0].v;
+  const cb = new Float64Array(n), cs = new Float64Array(n);
+  for (let k = 0; k < n; k++) { cb[k] = (k ? cb[k - 1] : 0) + fl.buy[k]; cs[k] = (k ? cs[k - 1] : 0) + fl.sell[k]; }
+  const gainAt = k => { k = Math.max(0, Math.min(n - 1, k | 0)); const g = vs.val[k].v - v0 - cb[k] + cs[k], base = v0 + cb[k]; return { g, gp: base > 0 ? g / base : null, base: cb[k] }; };
+  const last = gainAt(n - 1);
+  return { vs, v: vs.val[n - 1].v, i: vs.inv[n - 1].v, g: last.g, gp: last.gp, gainAt };
 }
+const PLABEL = { '1S': 'sur 7 jours', '1M': 'sur 1 mois', '3M': 'sur 3 mois', '6M': 'sur 6 mois', '1A': 'sur 1 an', Tout: 'depuis le début' };
 function groups(by) {
   const m = new Map();
   for (const it of state.items) {
@@ -1530,7 +1548,9 @@ VIEWS.total = function () {
   const usOn = state.items.some(it => !it.sold && (IMP[it.ref] || []).some(x => x[2] === 'us' && x[0] < T));
   const usNote = usOn ? ' Avant septembre 2026, la courbe suit les mouvements du marché TCGplayer (États-Unis), recalés sur tes prix d’achat et sur les prix Cardmarket actuels.' : '';
   const histNote = (estOn ? `Pointillés : estimation entre tes prix d’achat et les premiers prix connus (historique depuis le ${dfr(est)}).` : 'Survole la courbe pour voir la valeur à chaque date.') + usNote;
-  const t = totalsFor(ui.filter, from), all = totals();
+  const tot = ui.period === 'Tout';
+  const t = totalsFor(ui.filter, from, tot), all = totals();
+  const sub = d => tot ? `bénéfice total pour ${eur(t.gainAt(d - from).base, false)} investis` : `${PLABEL[ui.period]}${d < T ? ` (au ${dfr(d)})` : ''}`;
   const fl = { all: 'Toute la collection', sealed: 'Scellé', card: 'Cartes' }[ui.filter];
   const vs = t.vs;
   CH.main = {
@@ -1538,8 +1558,8 @@ VIEWS.total = function () {
     series: estOn
       ? [{ label: 'Estimation', color: 'var(--accent)', pts: vs.val.filter(p => p.d <= est), dot: true }, { label: 'Valeur', color: 'var(--accent)', pts: vs.val.filter(p => p.d >= est), area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }]
       : [{ label: 'Valeur', color: 'var(--accent)', pts: vs.val, area: true }, { label: 'Investi', color: 'var(--muted)', pts: vs.inv, dash: true }],
-    onHover: (d, o) => { const v = o['Valeur'] ?? o['Estimation'], i = o['Investi']; if (v == null) return; $('#hero-v').textContent = eur(v); $('#hero-g').innerHTML = gainChip(v - i, i ? v / i - 1 : null); $('#hero-i').textContent = `pour ${eur(i, false)} investis`; $('#hero-d').textContent = dfr(d) + (estOn && d < est ? ' (estimation)' : ''); },
-    onLeave: () => { $('#hero-v').textContent = eur(t.v); $('#hero-g').innerHTML = gainChip(t.g, t.gp); $('#hero-i').textContent = `pour ${eur(t.i, false)} investis`; $('#hero-d').textContent = 'Aujourd’hui'; },
+    onHover: (d, o) => { const v = o['Valeur'] ?? o['Estimation'], i = o['Investi']; if (v == null) return; $('#hero-v').textContent = eur(v); const g = t.gainAt(d - from); $('#hero-g').innerHTML = gainChip(g.g, g.gp); $('#hero-i').textContent = sub(d); $('#hero-d').textContent = dfr(d) + (estOn && d < est ? ' (estimation)' : ''); },
+    onLeave: () => { $('#hero-v').textContent = eur(t.v); $('#hero-g').innerHTML = gainChip(t.g, t.gp); $('#hero-i').textContent = sub(T); $('#hero-d').textContent = 'Aujourd’hui'; },
   };
   const rows = state.items.filter(isHeld).map(rowData).filter(r => r.pvp != null).sort((a, b) => b.pvp - a.pvp);
   const li = r => `<li data-item="${r.it.id}" tabindex="0">${thumb(r.p, 38, r.it.id)}<span class="nm">${esc(r.name)}</span>${gainChip(r.pv, r.pvp)}</li>`;
@@ -1552,7 +1572,7 @@ VIEWS.total = function () {
       <div>
         <p class="hero-label">${esc(fl)}</p>
         <p class="hero-value num" id="hero-v">${esc(eur(ui.counted ? t.v : 0))}</p>
-        <div class="hero-sub"><span id="hero-g">${gainChip(t.g, t.gp)}</span><span class="muted" id="hero-i">pour ${esc(eur(t.i, false))} investis</span><span class="hero-date" id="hero-d">Aujourd’hui</span></div>
+        <div class="hero-sub"><span id="hero-g">${gainChip(t.g, t.gp)}</span><span class="muted" id="hero-i">${esc(sub(T))}</span><span class="hero-date" id="hero-d">Aujourd’hui</span></div>
       </div>
       <div class="hero-ctrl">${chips('filter', ui.filter, [['all', 'Tout'], ['sealed', 'Scellé'], ['card', 'Cartes']], 'Filtrer')}${chips('period', ui.period, PERIODS, 'Période')}</div>
     </div>
